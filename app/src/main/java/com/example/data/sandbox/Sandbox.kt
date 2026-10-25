@@ -13,7 +13,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -119,9 +121,14 @@ class Sandbox(private val context: Context) {
   private val installScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   @Volatile private var isInstalling = false
 
+  // HTTP/1.1 with clean connection pool prevents stale socket aborts and HTTP/2 stream resets
   private val http = OkHttpClient.Builder()
-    .connectTimeout(25, TimeUnit.SECONDS)
-    .readTimeout(120, TimeUnit.SECONDS)
+    .protocols(listOf(Protocol.HTTP_1_1))
+    .retryOnConnectionFailure(true)
+    .connectionPool(ConnectionPool(0, 1, TimeUnit.NANOSECONDS))
+    .connectTimeout(30, TimeUnit.SECONDS)
+    .readTimeout(60, TimeUnit.SECONDS)
+    .writeTimeout(60, TimeUnit.SECONDS)
     .followRedirects(true)
     .build()
 
@@ -268,7 +275,7 @@ class Sandbox(private val context: Context) {
       // Clean recovery: if previous install was interrupted mid-extraction, clear incomplete rootfs
       if (!marker.exists() && (!File(rootfs, "usr/bin/env").exists() || !File(rootfs, "bin/bash").exists())) {
         if (rootfs.exists()) {
-          log("Cleaning interrupted sandbox state for fresh bootstrap")
+          log("Preparing clean rootfs directory")
           rootfs.deleteRecursively()
           rootfs.mkdirs()
         }
@@ -330,7 +337,7 @@ class Sandbox(private val context: Context) {
     }
 
     log("Downloading ${arch.tarball} (${arch.archName})...")
-    downloadFile("$UBUNTU_BASE_URL/${arch.tarball}", dest, "Ubuntu Base")
+    downloadFile("$UBUNTU_BASE_URL/${arch.tarball}", dest, "Ubuntu Base", expectedTotalBytes = 35_000_000L)
 
     _state.value = InstallState.Verifying
     OpenDroidService.updateStatus(context, "OpenDroid Setup: Verifying Checksum...")
@@ -351,7 +358,7 @@ class Sandbox(private val context: Context) {
 
     val dest = File(downloadsDir, arch.opencodeArchive)
     log("Downloading official OpenCode engine (${arch.archName})...")
-    downloadFile(arch.opencodeUrl, dest, "OpenCode Core")
+    downloadFile(arch.opencodeUrl, dest, "OpenCode Core", expectedTotalBytes = 78_000_000L)
 
     log("Extracting OpenCode to /usr/local/bin/opencode...")
     OpenDroidService.updateStatus(context, "OpenDroid Setup: Unpacking OpenCode...")
@@ -371,37 +378,111 @@ class Sandbox(private val context: Context) {
     log("OpenCode official binary deployed")
   }
 
-  private fun downloadFile(url: String, dest: File, label: String) {
-    val tmp = File(dest.parentFile, dest.name + ".tmp")
-    if (tmp.exists()) tmp.delete()
+  /**
+   * Resilient, chunked, resumable download with HTTP 206 Range support,
+   * exponential backoff retries, and rate-limited notification updates.
+   */
+  private fun downloadFile(url: String, dest: File, label: String, expectedTotalBytes: Long? = null) {
+    val partFile = File(dest.parentFile, dest.name + ".part")
+    val maxRetries = 6
+    var attempt = 0
+    var lastNotifTime = 0L
+    var lastLoggedPct = -1
 
-    val resp = http.newCall(Request.Builder().url(url).build()).execute()
-    resp.use {
-      if (!it.isSuccessful) throw IOException("Download HTTP ${it.code} from $url")
-      val body = it.body ?: throw IOException("Empty body from $url")
-      val total = body.contentLength().takeIf { n -> n > 0 }
-      var done = 0L
-      FileOutputStream(tmp).use { out ->
-        body.byteStream().use { input ->
-          val buf = ByteArray(64 * 1024)
-          while (true) {
-            val n = input.read(buf)
-            if (n < 0) break
-            out.write(buf, 0, n)
-            done += n
-            val pct = total?.let { t -> ((done.toDouble() / t) * 100).toInt().coerceIn(0, 100) } ?: 0
-            _state.value = InstallState.Downloading(pct)
-            if (pct % 10 == 0) {
-              OpenDroidService.updateStatus(context, "OpenDroid Setup: Downloading $label ($pct%)")
+    while (attempt < maxRetries) {
+      attempt++
+      var existingBytes = if (partFile.exists()) partFile.length() else 0L
+
+      try {
+        val reqBuilder = Request.Builder()
+          .url(url)
+          .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) OpenDroid/1.0")
+
+        if (existingBytes > 0) {
+          reqBuilder.header("Range", "bytes=$existingBytes-")
+          log("Resuming $label from byte $existingBytes (attempt $attempt/$maxRetries)...")
+        } else {
+          log("Downloading $label (attempt $attempt/$maxRetries)...")
+        }
+
+        val response = http.newCall(reqBuilder.build()).execute()
+        response.use { resp ->
+          val isPartial = resp.code == 206
+          val isOk = resp.code == 200
+
+          if (!isPartial && !isOk) {
+            throw IOException("Download failed with HTTP ${resp.code} from $url")
+          }
+
+          if (isOk && existingBytes > 0) {
+            log("Server returned full stream (HTTP 200); resetting $label download from offset 0")
+            partFile.delete()
+            existingBytes = 0L
+          }
+
+          val body = resp.body ?: throw IOException("Empty body from $url")
+          val contentLength = body.contentLength()
+          val totalBytes = if (isPartial) {
+            existingBytes + contentLength
+          } else if (contentLength > 0) {
+            contentLength
+          } else {
+            expectedTotalBytes ?: -1L
+          }
+
+          val append = isPartial && existingBytes > 0
+          FileOutputStream(partFile, append).use { fileOut ->
+            body.byteStream().use { streamIn ->
+              val buffer = ByteArray(64 * 1024)
+              var bytesRead: Int
+              var downloadedBytes = existingBytes
+
+              while (streamIn.read(buffer).also { bytesRead = it } != -1) {
+                fileOut.write(buffer, 0, bytesRead)
+                downloadedBytes += bytesRead
+
+                if (totalBytes > 0) {
+                  val pct = ((downloadedBytes.toDouble() / totalBytes) * 100).toInt().coerceIn(0, 100)
+                  _state.value = InstallState.Downloading(pct)
+
+                  val now = System.currentTimeMillis()
+                  if (now - lastNotifTime >= 1500L || pct == 100) {
+                    lastNotifTime = now
+                    OpenDroidService.updateStatus(context, "OpenDroid Setup: Downloading $label ($pct%)")
+                  }
+
+                  val step = pct / 25
+                  if (step > lastLoggedPct) {
+                    lastLoggedPct = step
+                    log("  ...$label $pct% (${downloadedBytes / (1024 * 1024)}MB / ${totalBytes / (1024 * 1024)}MB)")
+                  }
+                }
+              }
+              fileOut.flush()
             }
           }
+
+          if (totalBytes > 0 && partFile.length() < totalBytes) {
+            throw IOException("Stream closed early: received ${partFile.length()} of $totalBytes bytes")
+          }
+
+          if (dest.exists()) dest.delete()
+          if (!partFile.renameTo(dest)) {
+            partFile.copyTo(dest, overwrite = true)
+            partFile.delete()
+          }
+          log("$label download complete (${dest.length()} bytes)")
+          return
         }
+      } catch (e: Exception) {
+        log("Network interrupted during $label download: ${e.message ?: e.javaClass.simpleName}")
+        if (attempt >= maxRetries) {
+          throw IOException("Failed to download $label after $maxRetries attempts: ${e.message}", e)
+        }
+        val backoffMs = (attempt * 1500L).coerceAtMost(6000L)
+        log("Resuming in ${backoffMs / 1000}s...")
+        Thread.sleep(backoffMs)
       }
-    }
-    if (dest.exists()) dest.delete()
-    if (!tmp.renameTo(dest)) {
-      tmp.copyTo(dest, overwrite = true)
-      tmp.delete()
     }
   }
 
@@ -482,7 +563,18 @@ class Sandbox(private val context: Context) {
     put("/etc/resolv.conf", dnsServers().joinToString("\n") { "nameserver $it" } + "\n")
     put("/etc/hosts", "127.0.0.1 localhost\n::1 localhost ip6-localhost\n")
     put("/etc/hostname", "opendroid\n")
-    put("/etc/apt/apt.conf.d/99opendroid", "APT::Sandbox::User \"root\";\nDpkg::Options { \"--force-unsafe-io\"; };\nAcquire::Retries \"3\";\n")
+    put(
+      "/etc/apt/apt.conf.d/99opendroid",
+      """
+      APT::Sandbox::User "root";
+      Dpkg::Options { "--force-unsafe-io"; };
+      Acquire::Retries "5";
+      Acquire::ForceIPv4 "true";
+      Acquire::http::Timeout "30";
+      Acquire::https::Timeout "30";
+      Acquire::http::Pipeline-Depth "0";
+      """.trimIndent() + "\n"
+    )
     put("/etc/dpkg/dpkg.cfg.d/opendroid", "force-unsafe-io\n")
     guestToHost("/root/workspace").mkdirs()
     guestToHost("/mnt/shared").mkdirs()

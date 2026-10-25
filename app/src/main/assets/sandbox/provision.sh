@@ -41,11 +41,12 @@ esac
 # 4. Base packages (only essentials first to finish in seconds)
 if [ ! -f "$STAMP/.apt_done" ]; then
   step "Updating package index"
-  apt-get update -o Acquire::Retries=3 -qq || true
+  apt-get update -o Acquire::Retries=5 -o Acquire::ForceIPv4=true -qq || true
 
   step "Installing base tools"
   apt-get install -y --no-install-recommends \
     -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+    -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
     ca-certificates curl git python3 python3-venv python3-pip xz-utils less procps jq || true
   touch "$STAMP/.apt_done"
 fi
@@ -54,7 +55,7 @@ fi
 if [ ! -x /usr/local/bin/opencode ]; then
   step "Installing OpenCode ($OC_ARCH)"
   OC_URL="https://github.com/sst/opencode/releases/latest/download/opencode-linux-$OC_ARCH.tar.gz"
-  curl -fL "$OC_URL" -o /tmp/opencode.tar.gz || curl -fL "https://github.com/sst/opencode/releases/download/v0.1.48/opencode-linux-$OC_ARCH.tar.gz" -o /tmp/opencode.tar.gz || true
+  curl -fL --retry 5 --retry-delay 2 "$OC_URL" -o /tmp/opencode.tar.gz || curl -fL --retry 5 --retry-delay 2 "https://github.com/sst/opencode/releases/download/v0.1.48/opencode-linux-$OC_ARCH.tar.gz" -o /tmp/opencode.tar.gz || true
   if [ -f /tmp/opencode.tar.gz ]; then
     tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode 2>/dev/null || true
     chmod 0755 /usr/local/bin/opencode 2>/dev/null || true
@@ -71,7 +72,7 @@ fi
 
 if [ -x /opt/mem0/bin/pip ] && [ ! -f "$STAMP/.mem0_done" ]; then
   step "Installing server requirements"
-  /opt/mem0/bin/pip install --no-cache-dir --prefer-binary fastapi uvicorn requests || true
+  /opt/mem0/bin/pip install --no-cache-dir --prefer-binary --retries 5 --timeout 30 fastapi uvicorn requests || true
   touch "$STAMP/.mem0_done"
 fi
 

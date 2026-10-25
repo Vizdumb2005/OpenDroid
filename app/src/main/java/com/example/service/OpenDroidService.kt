@@ -47,7 +47,14 @@ class OpenDroidService : Service() {
     fun start(context: Context) = startService(context)
     fun stop(context: Context) = stopService(context)
 
+    @Volatile private var instance: OpenDroidService? = null
+
     fun updateStatus(context: Context, statusText: String) {
+      val active = instance
+      if (active != null) {
+        active.updateStatus(statusText)
+        return
+      }
       val intent = Intent(context, OpenDroidService::class.java).apply {
         action = ACTION_UPDATE_STATUS
         putExtra(EXTRA_STATUS, statusText)
@@ -67,6 +74,7 @@ class OpenDroidService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    instance = this
     createNotificationChannel()
 
     val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -120,6 +128,7 @@ class OpenDroidService : Service() {
   }
 
   override fun onDestroy() {
+    if (instance == this) instance = null
     releaseLocks()
     super.onDestroy()
   }
