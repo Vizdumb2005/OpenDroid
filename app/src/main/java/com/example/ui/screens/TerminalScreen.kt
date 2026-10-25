@@ -26,7 +26,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -49,13 +48,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.TerminalEntry
 import com.example.data.model.VmConfig
-import com.example.data.sandbox.UbuntuSandbox
 import com.example.ui.theme.BorderHighlight
 import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.BuildGreenGlow
 import com.example.ui.theme.CodeBackground
 import com.example.ui.theme.ErrorRed
-import com.example.ui.theme.PlanPurpleGlow
 import com.example.ui.theme.SurfaceCard
 import com.example.ui.theme.SurfaceElevated
 import com.example.ui.theme.TerminalCyan
@@ -66,11 +63,11 @@ import com.example.ui.theme.WarningOrange
 
 @Composable
 fun TerminalScreen(
-  sandbox: UbuntuSandbox,
   history: List<TerminalEntry>,
   vmConfig: VmConfig,
   onExecuteCommand: (String) -> Unit,
   onClear: () -> Unit,
+  currentUser: String = "root",
   modifier: Modifier = Modifier
 ) {
   var commandInput by remember { mutableStateOf("") }
@@ -78,22 +75,17 @@ fun TerminalScreen(
   val chipScroll = rememberScrollState()
 
   val quickLinuxCommands = listOf(
-    "ping 8.8.8.8",
-    "composio apps",
-    "neofetch",
     "uname -a",
     "cat /etc/os-release",
-    "curl https://opencode.ai/download/stable/linux-x64-deb -o /tmp/opencode.deb",
-    "sudo dpkg -i /tmp/opencode.deb",
-    "opencode --version",
-    "node src/index.ts",
-    "mem0 stats",
-    "mem0 list",
-    "sudo su",
     "free -h",
     "df -h",
+    "ps aux",
+    "opencode --version",
+    "python3 --version",
     "apt update",
-    "ls -la /",
+    "curl -I https://google.com",
+    "ls -la /root/workspace",
+    "git status",
     "clear"
   )
 
@@ -127,14 +119,14 @@ fun TerminalScreen(
         )
         Spacer(modifier = Modifier.width(6.dp))
         Text(
-          text = "Ubuntu Server 26.04.1 LTS (ARM64)",
+          text = "Ubuntu 26.04.1 LTS (ARM64)",
           style = MaterialTheme.typography.labelSmall,
           fontWeight = FontWeight.Bold,
           color = TextPrimary
         )
         Spacer(modifier = Modifier.width(6.dp))
         Text(
-          text = "sudo NOPASSWD",
+          text = "PRoot uid=0 (root)",
           style = MaterialTheme.typography.labelSmall,
           color = WarningOrange,
           fontSize = 9.sp,
@@ -190,7 +182,7 @@ fun TerminalScreen(
           Text(
             text = cmd,
             style = MaterialTheme.typography.labelSmall,
-            color = if (cmd.startsWith("sudo")) WarningOrange else TerminalCyan,
+            color = if (cmd.startsWith("apt") || cmd.startsWith("curl")) WarningOrange else TerminalCyan,
             fontSize = 11.sp
           )
         }
@@ -208,17 +200,12 @@ fun TerminalScreen(
     ) {
       items(history, key = { it.id }) { entry ->
         Column(modifier = Modifier.fillMaxWidth()) {
-          // Command Line Prompt
-          val isRoot = sandbox.currentUser == "root" || entry.command.startsWith("sudo")
-          val promptChar = if (isRoot) "#" else "$"
-          val userColor = if (isRoot) ErrorRed else BuildGreenGlow
-          val userLabel = if (isRoot) "root@ubuntu-server-arm64" else "ubuntu@ubuntu-server-arm64"
-
+          val userLabel = "root@opendroid-arm64"
           Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-              text = "$userLabel:${entry.workingDir}$promptChar ",
+              text = "$userLabel:${entry.workingDir}# ",
               style = MaterialTheme.typography.labelSmall,
-              color = userColor,
+              color = BuildGreenGlow,
               fontWeight = FontWeight.Bold
             )
             Text(
@@ -229,7 +216,6 @@ fun TerminalScreen(
             )
           }
 
-          // Output
           if (entry.output.isNotBlank()) {
             Spacer(modifier = Modifier.height(2.dp))
             Text(
@@ -252,11 +238,10 @@ fun TerminalScreen(
         .padding(horizontal = 8.dp, vertical = 6.dp),
       verticalAlignment = Alignment.CenterVertically
     ) {
-      val isRoot = sandbox.currentUser == "root"
       Text(
-        text = if (isRoot) "root# " else "ubuntu$ ",
+        text = "root# ",
         style = MaterialTheme.typography.labelMedium,
-        color = if (isRoot) ErrorRed else BuildGreenGlow,
+        color = BuildGreenGlow,
         fontWeight = FontWeight.Bold
       )
 
@@ -264,7 +249,7 @@ fun TerminalScreen(
         value = commandInput,
         onValueChange = { commandInput = it },
         placeholder = {
-          Text("bash, sudo apt update, neofetch, python3...", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+          Text("bash command, apt, opencode, python3...", style = MaterialTheme.typography.labelSmall, color = TextMuted)
         },
         textStyle = MaterialTheme.typography.labelSmall.copy(color = TextPrimary),
         singleLine = true,
@@ -305,7 +290,7 @@ fun TerminalScreen(
       ) {
         Icon(
           imageVector = Icons.Default.PlayArrow,
-          contentDescription = "Execute in Ubuntu",
+          contentDescription = "Execute in Ubuntu Sandbox",
           tint = BuildGreenGlow,
           modifier = Modifier.size(18.dp)
         )

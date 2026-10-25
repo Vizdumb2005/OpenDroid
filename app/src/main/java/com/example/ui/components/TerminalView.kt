@@ -104,7 +104,7 @@ fun TerminalView(
         )
         Spacer(modifier = Modifier.width(6.dp))
         Text(
-          text = "opencode-bash • ~/workspace",
+          text = "opendroid-bash • ~/workspace",
           style = MaterialTheme.typography.labelSmall,
           fontWeight = FontWeight.Bold,
           color = TextPrimary
@@ -169,7 +169,7 @@ fun TerminalView(
           // Command line
           Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-              text = "dev@opencode:${entry.workingDir}$ ",
+              text = "dev@opendroid:${entry.workingDir}$ ",
               style = MaterialTheme.typography.labelSmall,
               color = BuildGreenGlow,
               fontWeight = FontWeight.Bold

@@ -1,6 +1,6 @@
 {
-  "name": "OpenCode",
-  "description": "Self-contained GUI port of OpenCode AI coding assistant for Android with dual-agent (Build & Plan) modes, interactive terminal, workspace editor, and git diffs.",
+  "name": "OpenDroid",
+  "description": "Autonomous AI coding environment for Android with native Linux sandbox, terminal, mobile IDE, Composio toolkits and Mem0 long-term memory.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

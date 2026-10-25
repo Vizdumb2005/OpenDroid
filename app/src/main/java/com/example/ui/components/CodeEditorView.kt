@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -300,6 +301,44 @@ fun CodeEditorView(
           lineHeight = 15.sp,
           modifier = Modifier.fillMaxWidth()
         )
+      }
+    }
+
+    // Mobile Programmer's Accessory Bar (Essential for coding on touchscreen phones)
+    val symbolScroll = rememberScrollState()
+    val mobileSymbols = listOf("Tab", "{", "}", "(", ")", "[", "]", ";", "\"", "'", "<", ">", "/", "\\", "=", "+", "-", "_", ":", "$", "&", "|", "!", "@")
+
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .background(SurfaceElevated)
+        .border(0.5.dp, BorderSubtle)
+        .horizontalScroll(symbolScroll)
+        .padding(horizontal = 4.dp, vertical = 2.dp),
+      horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+      mobileSymbols.forEach { sym ->
+        Box(
+          modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(SurfaceCard)
+            .border(0.5.dp, BorderHighlight, RoundedCornerShape(4.dp))
+            .clickable {
+              val insertText = if (sym == "Tab") "  " else sym
+              editorContent = editorContent + insertText
+            }
+            .padding(horizontal = 9.dp, vertical = 6.dp)
+            .testTag("symbol_bar_$sym"),
+          contentAlignment = Alignment.Center
+        ) {
+          Text(
+            text = sym,
+            fontFamily = JetBrainsMono,
+            fontWeight = FontWeight.Bold,
+            color = if (sym == "Tab") BuildGreenGlow else TerminalCyan,
+            fontSize = 12.sp
+          )
+        }
       }
     }
 

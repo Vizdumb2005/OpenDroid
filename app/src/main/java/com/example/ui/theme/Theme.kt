@@ -4,7 +4,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
-private val OpenCodeColorScheme = darkColorScheme(
+private val OpenDroidColorScheme = darkColorScheme(
   primary = BuildGreenGlow,
   onPrimary = DeepBlack,
   primaryContainer = SurfaceCard,
@@ -28,12 +28,19 @@ private val OpenCodeColorScheme = darkColorScheme(
 )
 
 @Composable
-fun OpenCodeTheme(
+fun OpenDroidTheme(
   content: @Composable () -> Unit,
 ) {
   MaterialTheme(
-    colorScheme = OpenCodeColorScheme,
+    colorScheme = OpenDroidColorScheme,
     typography = Typography,
     content = content,
   )
+}
+
+@Composable
+fun OpenCodeTheme(
+  content: @Composable () -> Unit,
+) {
+  OpenDroidTheme(content)
 }

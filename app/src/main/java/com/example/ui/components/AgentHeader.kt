@@ -104,21 +104,21 @@ fun AgentHeader(
           ) {
             Icon(
               imageVector = Icons.Default.Terminal,
-              contentDescription = "OpenCode Logo",
+              contentDescription = "OpenDroid Logo",
               tint = BuildGreenGlow,
               modifier = Modifier.size(18.dp)
             )
           }
           Spacer(modifier = Modifier.width(8.dp))
           Text(
-            text = "OpenCode",
+            text = "OpenDroid",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = TextPrimary
           )
           Spacer(modifier = Modifier.width(6.dp))
           Text(
-            text = "v2.4",
+            text = "ARM64 Sandbox",
             style = MaterialTheme.typography.labelSmall,
             color = TerminalCyan,
             modifier = Modifier

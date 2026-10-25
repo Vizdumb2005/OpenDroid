@@ -316,7 +316,7 @@ fun ChatScreen(
           onValueChange = { inputText = it },
           placeholder = {
             Text(
-              "Type '/' for OpenCode slash commands & skills...",
+              "Type '/' for OpenDroid slash commands & tools...",
               style = MaterialTheme.typography.labelSmall,
               color = TextMuted
             )
@@ -423,7 +423,7 @@ fun ChatMessageBubble(
         Spacer(modifier = Modifier.width(4.dp))
       }
       Text(
-        text = if (isUser) "You" else if (isSystem) "System" else "OpenCode Agent (${message.mode.name})",
+        text = if (isUser) "You" else if (isSystem) "System" else "OpenDroid Agent (${message.mode.name})",
         style = MaterialTheme.typography.labelSmall,
         color = if (isUser) TextMuted else if (isSystem) TerminalCyan else TextSecondary,
         fontSize = 11.sp

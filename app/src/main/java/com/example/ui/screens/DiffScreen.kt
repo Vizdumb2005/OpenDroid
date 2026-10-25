@@ -174,7 +174,7 @@ fun DiffScreen(
           OutlinedTextField(
             value = commitMessage,
             onValueChange = onCommitMessageChange,
-            placeholder = { Text("feat: update logic via OpenCode agent", color = TextMuted, fontSize = 12.sp) },
+            placeholder = { Text("feat: update logic via OpenDroid agent", color = TextMuted, fontSize = 12.sp) },
             singleLine = true,
             textStyle = MaterialTheme.typography.labelSmall.copy(color = TextPrimary),
             colors = OutlinedTextFieldDefaults.colors(

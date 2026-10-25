@@ -9,14 +9,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.example.ui.MainScreen
 import com.example.ui.theme.DeepBlack
-import com.example.ui.theme.OpenCodeTheme
+import com.example.ui.theme.OpenDroidTheme
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     setContent {
-      OpenCodeTheme {
+      OpenDroidTheme {
         Surface(
           modifier = Modifier.fillMaxSize(),
           color = DeepBlack

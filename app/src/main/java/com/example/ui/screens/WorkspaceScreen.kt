@@ -68,7 +68,7 @@ import com.example.ui.theme.WarningOrange
 fun WorkspaceScreen(
   files: Map<String, WorkspaceFile>,
   selectedFile: WorkspaceFile?,
-  activeProjectName: String = "OpenCode Project",
+  activeProjectName: String = "OpenDroid Project",
   onSelectFile: (WorkspaceFile?) -> Unit,
   onSaveFile: (String, String) -> Unit,
   onRevertFile: (String) -> Unit,
@@ -188,7 +188,7 @@ fun WorkspaceScreen(
 
           Text("Switch Project Folder:", color = TextSecondary, fontSize = 11.sp)
           listOf(
-            "OpenCode Microservice" to "src/index.ts, src/auth.ts, express setup",
+            "OpenDroid Microservice" to "src/index.ts, src/auth.ts, express setup",
             "Python AI Workspace" to "scripts/main.py, requirements.txt",
             "Clean Empty Project" to "Empty workspace directory for new development"
           ).forEach { (pName, desc) ->

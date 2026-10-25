@@ -6,7 +6,10 @@ data class VmConfig(
   val isCustom: Boolean = false,
   val recommendedRamMb: Int = 2048,
   val recommendedDiskGb: Int = 8
-)
+) {
+  val ramLimitMb: Int get() = allocatedRamMb
+  val storageLimitGb: Int get() = allocatedDiskGb
+}
 
 data class DeviceHardwareInfo(
   val totalRamMb: Int,

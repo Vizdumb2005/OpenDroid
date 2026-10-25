@@ -3,12 +3,10 @@ package com.example.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.ai.AgentResponseChunk
-import com.example.data.ai.OpenCodeAgentEngine
-import com.example.data.ai.OpenCodeModelCatalog
-import com.example.data.knowledge.UniversalKnowledgeRepository
-import com.example.data.memory.Mem0Engine
+import com.example.data.composio.ComposioClient
+import com.example.data.knowledge.KnowledgeRepository
 import com.example.data.memory.Mem0Memory
+import com.example.data.memory.MemoryClient
 import com.example.data.model.AgentMode
 import com.example.data.model.AgentSession
 import com.example.data.model.ChatAttachment
@@ -20,31 +18,29 @@ import com.example.data.model.TerminalEntry
 import com.example.data.model.ToolCall
 import com.example.data.model.VmConfig
 import com.example.data.model.WorkspaceFile
+import com.example.data.opencode.ChatAssembler
+import com.example.data.opencode.OpenCodeClient
 import com.example.data.repository.WorkspaceRepository
-import com.example.data.sandbox.HardwareAdvisor
-import com.example.data.sandbox.SandboxFile
-import com.example.data.sandbox.UbuntuSandbox
-import com.example.data.skills.GraphifyEngine
-import com.example.data.skills.GraphifyResult
-import com.example.data.skills.PonytailEngine
-import com.example.data.skills.PonytailReport
+import com.example.data.runtime.SandboxRuntime
+import com.example.data.sandbox.ResourceAllocator
+import com.example.data.sandbox.Sandbox
+import com.example.data.sandbox.TerminalManager
+import com.example.data.security.SecretStore
+import com.example.data.settings.AppSettings
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
-
-import com.example.data.composio.ComposioManager
-import com.example.data.memory.AgentMemoryCompiler
-import com.example.data.model.OpenCodeModel
 
 enum class AppTab(val title: String) {
   CHAT("Agent"),
-  TERMINAL("Ubuntu LTS"),
+  TERMINAL("Terminal"),
   WORKSPACE("Files"),
   DIFFS("Diffs"),
-  TRANSFERS("Transfers"),
   KNOWLEDGE("Memory"),
   SETTINGS("Config")
 }
@@ -60,67 +56,66 @@ data class MainUiState(
   val preferredModel: String = "bigpickle",
   val commitMessageInput: String = "",
   val activeAttachments: List<ChatAttachment> = emptyList(),
-  val vmConfig: VmConfig = VmConfig(),
-  val activeGraphifyResult: GraphifyResult? = null,
-  val activePonytailReport: PonytailReport? = null
+  val vmConfig: VmConfig = VmConfig()
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-  val composioManager: ComposioManager = ComposioManager()
-  val modelCatalog: OpenCodeModelCatalog = OpenCodeModelCatalog()
-  val mem0Engine: Mem0Engine = Mem0Engine(application)
-  val workspaceRepository: WorkspaceRepository = WorkspaceRepository()
-  val ubuntuSandbox: UbuntuSandbox = UbuntuSandbox(mem0Engine = mem0Engine, composioManager = composioManager)
-  val knowledgeRepository: UniversalKnowledgeRepository = UniversalKnowledgeRepository(application)
-  val agentEngine: OpenCodeAgentEngine = OpenCodeAgentEngine(
-    workspaceRepository = workspaceRepository,
-    ubuntuSandbox = ubuntuSandbox,
-    mem0Engine = mem0Engine,
-    composioManager = composioManager,
-    modelCatalog = modelCatalog
-  )
-  val memoryCompiler: AgentMemoryCompiler = AgentMemoryCompiler(mem0Engine, knowledgeRepository)
+  val appSettings: AppSettings = AppSettings(application)
+  val secretStore: SecretStore = SecretStore(application)
+  val resourceAllocator: ResourceAllocator = ResourceAllocator(application)
+  val sandbox: Sandbox = Sandbox(application)
+  val composioClient: ComposioClient = ComposioClient(appSettings, secretStore)
+  val runtime: SandboxRuntime = SandboxRuntime(application, sandbox, secretStore, appSettings, composioClient)
+  val openCodeClient: OpenCodeClient = OpenCodeClient(secretStore)
+  val memoryClient: MemoryClient = MemoryClient(sandbox, appSettings, secretStore)
+  val workspaceRepository: WorkspaceRepository = WorkspaceRepository(sandbox)
+  val terminalManager: TerminalManager = TerminalManager(sandbox)
+  val knowledgeRepository: KnowledgeRepository = KnowledgeRepository(application, sandbox)
 
-  val deviceInfo: DeviceHardwareInfo = HardwareAdvisor.getDeviceHardwareInfo(application)
+  val deviceInfo: DeviceHardwareInfo = resourceAllocator.getDeviceHardwareInfo()
 
-  private val _uiState = MutableStateFlow(MainUiState(preferredModel = agentEngine.preferredModel))
+  private val _uiState = MutableStateFlow(MainUiState(preferredModel = appSettings.preferredModel))
   val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
-  val catalogModels: StateFlow<List<OpenCodeModel>> = modelCatalog.models
+  val sandboxState: StateFlow<Sandbox.InstallState> = sandbox.state
+  val sandboxInstallLog: StateFlow<List<String>> = sandbox.installLog
+  val runtimeStatus: StateFlow<SandboxRuntime.RuntimeStatus> = runtime.status
+
   val activeProjectName: StateFlow<String> = workspaceRepository.activeProjectName
   val workspaceFiles: StateFlow<Map<String, WorkspaceFile>> = workspaceRepository.files
-  val sandboxFiles: StateFlow<Map<String, SandboxFile>> = ubuntuSandbox.files
-  val terminalEntries: StateFlow<List<TerminalEntry>> = ubuntuSandbox.terminalHistory
+  val terminalEntries: StateFlow<List<TerminalEntry>> = terminalManager.history
   val gitCommits: StateFlow<List<GitCommit>> = workspaceRepository.gitCommits
   val knowledgeItems: StateFlow<List<KnowledgeItem>> = knowledgeRepository.items
-  val mem0Memories: StateFlow<List<com.example.data.memory.Mem0Memory>> = mem0Engine.memories
+
+  private val _mem0Memories = MutableStateFlow<List<Mem0Memory>>(emptyList())
+  val mem0Memories: StateFlow<List<Mem0Memory>> = _mem0Memories.asStateFlow()
 
   init {
-    agentEngine.memoryCompiler = memoryCompiler
-    val optimalConfig = HardwareAdvisor.computeOptimalVmConfig(deviceInfo)
-    ubuntuSandbox.updateVmConfig(optimalConfig)
-
-    viewModelScope.launch {
-      modelCatalog.fetchLiveModels()
-    }
+    val optimalBudget = resourceAllocator.computeBudget()
+    val initialConfig = VmConfig(
+      allocatedRamMb = appSettings.ramLimitMb.takeIf { it > 0 } ?: optimalBudget.ramLimitMb,
+      allocatedDiskGb = appSettings.storageLimitGb.takeIf { it > 0 } ?: optimalBudget.storageLimitGb,
+      recommendedRamMb = optimalBudget.ramLimitMb,
+      recommendedDiskGb = optimalBudget.storageLimitGb
+    )
 
     val initialSession = AgentSession(
       id = UUID.randomUUID().toString(),
-      title = "OpenCode Live Project",
+      title = "OpenDroid Autonomous Session",
       agentMode = AgentMode.BUILD,
       messages = listOf(
         ChatMessage(
           id = UUID.randomUUID().toString(),
           sender = "assistant",
-          text = """👋 Welcome to **OpenCode** on Android!
-- **OpenCode Model Catalog**: Running `${agentEngine.preferredModel}` [ALWAYS FREE & DEFAULT]. No API key required.
-- **Composio Agent Tooling**: Integrated 250+ developer tools (GitHub, Local File Tool, Linux Shell, Linear, Browserbase).
-- **Sandboxed Linux VM**: Essential **Ubuntu Server 26.04.1 LTS (ARM64 Essential - aarch64)** with `sudo` and live internet access.
-- **Mem0 Long-Term Memory**: Automatic context extraction & compilation across sessions.
-- **Skills & Slash Commands**: `/composio`, `/graphify`, `/ponytail`, `/superpower`.
+          text = """👋 Welcome to **OpenDroid**!
+- **Sandboxed Linux**: Real Ubuntu 26.04.1 LTS (ARM64) running in user-space via PRoot.
+- **Autonomous Core Engine**: Connected to official headless server on localhost with live SSE streaming.
+- **Mem0 Long-Term Memory**: Persistent vector memory running locally inside sandbox with fast MCP tools.
+- **Composio Tool Router**: Cloud developer tool integration (GitHub, Jira, Linear, Browserbase, Shell).
+- **Mobile Programmer IDE**: Mobile symbol bar, syntax highlighting, and live diffs under `/root/workspace`.
 
-Type **`/`** to view all OpenCode slash commands & skills, or attach files via the paperclip icon!""",
+Type **`/`** to explore OpenDroid slash commands, or ask me to build, code, run, or diagnose anything!""",
           mode = AgentMode.BUILD
         )
       )
@@ -130,13 +125,36 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
       it.copy(
         sessions = listOf(initialSession),
         activeSessionId = initialSession.id,
-        vmConfig = optimalConfig
+        vmConfig = initialConfig,
+        autoApproveTools = appSettings.autoApproveTools
       )
+    }
+
+    // Initialize sandbox and runtime asynchronously
+    viewModelScope.launch(Dispatchers.IO) {
+      if (sandbox.isInstalled()) {
+        knowledgeRepository.loadDirectives()
+        runtime.startAll()
+        workspaceRepository.refreshFiles()
+        refreshMemories()
+      }
     }
   }
 
   val activeSession: AgentSession?
     get() = _uiState.value.sessions.find { it.id == _uiState.value.activeSessionId }
+
+  fun triggerSandboxInstall() {
+    viewModelScope.launch(Dispatchers.IO) {
+      sandbox.startInstall()
+      if (sandbox.isInstalled()) {
+        knowledgeRepository.loadDirectives()
+        runtime.startAll()
+        workspaceRepository.refreshFiles()
+        refreshMemories()
+      }
+    }
+  }
 
   fun setTab(tab: AppTab) {
     _uiState.update { it.copy(activeTab = tab) }
@@ -161,7 +179,7 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
         ChatMessage(
           id = UUID.randomUUID().toString(),
           sender = "assistant",
-          text = "Started new agent session in mode **${_uiState.value.sessions.firstOrNull()?.agentMode?.name ?: "BUILD"}** with free catalog model.",
+          text = "Started new OpenDroid session in mode **${_uiState.value.sessions.firstOrNull()?.agentMode?.name ?: "BUILD"}**.",
           mode = _uiState.value.sessions.firstOrNull()?.agentMode ?: AgentMode.BUILD
         )
       )
@@ -180,9 +198,10 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
 
   fun addAttachment(attachment: ChatAttachment) {
     _uiState.update { it.copy(activeAttachments = it.activeAttachments + attachment) }
-    // Also mirror into sandbox inbox
     if (attachment.contentSnippet != null) {
-      ubuntuSandbox.importFromAndroid(attachment.name, attachment.contentSnippet)
+      viewModelScope.launch(Dispatchers.IO) {
+        workspaceRepository.writeFile("inbox/${attachment.name}", attachment.contentSnippet)
+      }
     }
   }
 
@@ -198,24 +217,30 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
   }
 
   fun saveFileContent(path: String, newContent: String) {
-    workspaceRepository.writeFile(path, newContent)
-    ubuntuSandbox.writeFile("/home/ubuntu/$path", newContent)
-    val updated = workspaceRepository.files.value[path]
-    _uiState.update { it.copy(selectedFile = updated) }
+    viewModelScope.launch(Dispatchers.IO) {
+      workspaceRepository.writeFile(path, newContent)
+      val updated = workspaceRepository.files.value[path]
+      _uiState.update { it.copy(selectedFile = updated) }
+    }
   }
 
   fun revertFile(path: String) {
-    workspaceRepository.revertFile(path)
-    val updated = workspaceRepository.files.value[path]
-    _uiState.update { it.copy(selectedFile = updated) }
+    viewModelScope.launch(Dispatchers.IO) {
+      workspaceRepository.revertFile(path)
+      val updated = workspaceRepository.files.value[path]
+      _uiState.update { it.copy(selectedFile = updated) }
+    }
   }
 
   fun executeTerminalCommand(command: String) {
-    ubuntuSandbox.executeCommand(command)
+    viewModelScope.launch(Dispatchers.IO) {
+      terminalManager.execute(command)
+      workspaceRepository.refreshFiles()
+    }
   }
 
   fun clearTerminal() {
-    ubuntuSandbox.clearTerminal()
+    terminalManager.clear()
   }
 
   fun setCommitMessageInput(msg: String) {
@@ -223,74 +248,96 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
   }
 
   fun commitModifiedFiles() {
-    val msg = _uiState.value.commitMessageInput.ifBlank { "Update files via OpenCode Agent" }
-    val commit = workspaceRepository.gitCommit(msg)
-    if (commit != null) {
-      _uiState.update { it.copy(commitMessageInput = "") }
-      ubuntuSandbox.addTerminalEntry("git commit -m \"$msg\"", "[main ${commit.hash}] $msg")
+    val msg = _uiState.value.commitMessageInput.ifBlank { "Update files via OpenDroid" }
+    viewModelScope.launch(Dispatchers.IO) {
+      val commit = workspaceRepository.gitCommit(msg)
+      if (commit != null) {
+        _uiState.update { it.copy(commitMessageInput = "") }
+        terminalManager.addEntry("git commit -m \"$msg\"", "[main ${commit.hash}] $msg")
+      }
     }
   }
 
   fun updateVmConfig(config: VmConfig) {
-    ubuntuSandbox.updateVmConfig(config)
+    appSettings.ramLimitMb = config.allocatedRamMb
+    appSettings.storageLimitGb = config.allocatedDiskGb
     _uiState.update { it.copy(vmConfig = config) }
   }
 
   fun updatePreferredModel(model: String) {
-    agentEngine.preferredModel = model
+    appSettings.preferredModel = model
     _uiState.update { it.copy(preferredModel = model) }
   }
 
   fun updateAutoApprove(autoApprove: Boolean) {
-    agentEngine.autoApproveTools = autoApprove
+    appSettings.autoApproveTools = autoApprove
     _uiState.update { it.copy(autoApproveTools = autoApprove) }
   }
 
-  fun importFromAndroid(name: String, content: String) {
-    ubuntuSandbox.importFromAndroid(name, content)
-    workspaceRepository.writeFile("downloads/$name", content)
-  }
-
   fun runFileInSandbox(path: String): String {
-    return workspaceRepository.runFileInSandbox(path, ubuntuSandbox)
+    return workspaceRepository.runFileInSandbox(path)
   }
 
   fun switchProject(name: String) {
-    workspaceRepository.switchProject(name)
+    viewModelScope.launch(Dispatchers.IO) {
+      workspaceRepository.switchProject(name)
+    }
   }
 
-  fun toggleModelEnabled(modelId: String) {
-    modelCatalog.toggleModelEnabled(modelId)
+  fun deleteFile(path: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      workspaceRepository.deleteFile(path)
+    }
+  }
+
+  fun addKnowledgeItem(title: String, content: String, category: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      knowledgeRepository.addItem(title, content, category)
+    }
+  }
+
+  fun toggleKnowledgeItem(id: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      knowledgeRepository.toggleItem(id)
+    }
+  }
+
+  fun deleteKnowledgeItem(id: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      knowledgeRepository.deleteItem(id)
+    }
+  }
+
+  fun refreshMemories() {
+    viewModelScope.launch(Dispatchers.IO) {
+      try {
+        val result = memoryClient.listMemories()
+        result.onSuccess { list ->
+          _mem0Memories.value = list
+        }
+      } catch (_: Exception) { }
+    }
   }
 
   fun addMem0Memory(text: String, category: String = "fact") {
-    mem0Engine.add(text, category)
+    viewModelScope.launch(Dispatchers.IO) {
+      memoryClient.addMemory(text, category)
+      refreshMemories()
+    }
   }
 
   fun deleteMem0Memory(id: String) {
-    mem0Engine.delete(id)
+    viewModelScope.launch(Dispatchers.IO) {
+      memoryClient.deleteMemory(id)
+      refreshMemories()
+    }
   }
 
   fun clearAllMem0Memories() {
-    mem0Engine.clearAll()
-  }
-
-  fun runGraphify() {
-    val result = GraphifyEngine.analyzeProject(workspaceFiles.value)
-    _uiState.update { it.copy(activeGraphifyResult = result) }
-  }
-
-  fun closeGraphify() {
-    _uiState.update { it.copy(activeGraphifyResult = null) }
-  }
-
-  fun runPonytail() {
-    val report = PonytailEngine.reviewCodebase(workspaceFiles.value)
-    _uiState.update { it.copy(activePonytailReport = report) }
-  }
-
-  fun closePonytail() {
-    _uiState.update { it.copy(activePonytailReport = null) }
+    viewModelScope.launch(Dispatchers.IO) {
+      memoryClient.clearAll()
+      refreshMemories()
+    }
   }
 
   fun sendPrompt(userText: String) {
@@ -301,7 +348,6 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
     val currentSession = activeSession ?: return
     val currentMode = currentSession.agentMode
 
-    // Handle slash commands
     if (trimmed.startsWith("/")) {
       handleSlashCommand(trimmed, currentSession)
       return
@@ -324,78 +370,84 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
       isStreaming = true
     )
 
-    // Clear active attachments after sending
-    _uiState.update { it.copy(activeAttachments = emptyList()) }
+    _uiState.update { it.copy(activeAttachments = emptyList(), isGenerating = true, statusMessage = "OpenDroid agent processing...") }
 
     updateSessionMessages(currentSession.id) { currentList ->
       currentList + userMessage + initialAssistantMessage
     }
 
-    _uiState.update { it.copy(isGenerating = true, statusMessage = "OpenCode free agent processing...") }
-
-    viewModelScope.launch {
-      val toolsAcc = mutableListOf<ToolCall>()
-      val textAcc = StringBuilder()
-
-      val kbContext = knowledgeRepository.getKnowledgePromptInjection()
-
-      try {
-        agentEngine.processUserPrompt(
-          prompt = trimmed,
-          mode = currentMode,
-          chatHistory = currentSession.messages,
-          attachments = attachments,
-          knowledgeContext = kbContext
-        ).collect { chunk ->
-          when (chunk) {
-            is AgentResponseChunk.StatusUpdate -> {
-              _uiState.update { it.copy(statusMessage = chunk.status) }
-            }
-
-            is AgentResponseChunk.ContentStream -> {
-              textAcc.append(chunk.text)
-              updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
-                msg.copy(text = textAcc.toString(), isStreaming = true)
-              }
-            }
-
-            is AgentResponseChunk.ToolExecuting -> {
-              toolsAcc.add(chunk.tool)
-              updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
-                msg.copy(toolCalls = toolsAcc.toList())
-              }
-            }
-
-            is AgentResponseChunk.ToolCompleted -> {
-              val idx = toolsAcc.indexOfFirst { it.id == chunk.tool.id }
-              if (idx != -1) {
-                toolsAcc[idx] = chunk.tool
-              } else {
-                toolsAcc.add(chunk.tool)
-              }
-              updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
-                msg.copy(toolCalls = toolsAcc.toList())
-              }
+    viewModelScope.launch(Dispatchers.IO) {
+      val assembler = ChatAssembler()
+      val promptToSend = buildString {
+        append(trimmed)
+        if (attachments.isNotEmpty()) {
+          append("\n\nAttachments:\n")
+          attachments.forEach { att ->
+            append("- ${att.name} (${att.mimeType})\n")
+            if (att.contentSnippet != null) {
+              append("```\n${att.contentSnippet}\n```\n")
             }
           }
         }
+      }
 
-        updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
-          msg.copy(
-            text = textAcc.toString().ifBlank { "Task processed successfully in sandbox." },
-            isStreaming = false,
-            toolCalls = toolsAcc.toList()
-          )
+      val sseJob = launch {
+        openCodeClient.events().collect { sseEvent ->
+          val streamEvent = assembler.consume(sseEvent)
+          if (streamEvent != null) {
+            val (msgText, tools, status) = assembler.snapshot()
+            if (status != null) {
+              _uiState.update { it.copy(statusMessage = status) }
+            }
+            updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
+              msg.copy(
+                text = msgText,
+                toolCalls = tools,
+                isStreaming = true
+              )
+            }
+          }
+        }
+      }
+
+      try {
+        val promptResult = openCodeClient.prompt(currentSession.id, promptToSend)
+        if (promptResult.isFailure) {
+          updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
+            msg.copy(
+              text = "Agent error: ${promptResult.exceptionOrNull()?.localizedMessage ?: "Failed to reach daemon"}",
+              isStreaming = false
+            )
+          }
+        } else {
+          val (finalText, finalTools, _) = assembler.snapshot()
+          updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
+            msg.copy(
+              text = finalText.ifBlank { "Task processed in sandbox." },
+              toolCalls = finalTools,
+              isStreaming = false
+            )
+          }
+
+          // Auto extract long-term memory via Mem0 if meaningful
+          if (finalText.length > 30) {
+            launch {
+              memoryClient.addMemory("OpenDroid task: ${trimmed.take(120)}", "interaction")
+              refreshMemories()
+            }
+          }
         }
       } catch (e: Exception) {
         updateAssistantMessage(currentSession.id, assistantMsgId) { msg ->
           msg.copy(
-            text = "Error running agent: ${e.localizedMessage ?: "Unknown error"}",
+            text = "OpenDroid execution error: ${e.localizedMessage ?: "Unknown error"}",
             isStreaming = false
           )
         }
       } finally {
+        sseJob.cancel()
         _uiState.update { it.copy(isGenerating = false, statusMessage = null) }
+        workspaceRepository.refreshFiles()
       }
     }
   }
@@ -411,95 +463,79 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
       "terminal" -> setTab(AppTab.TERMINAL)
       "files" -> setTab(AppTab.WORKSPACE)
       "diff" -> setTab(AppTab.DIFFS)
-      "import", "export" -> setTab(AppTab.TRANSFERS)
-      "context" -> setTab(AppTab.KNOWLEDGE)
-      "model" -> setTab(AppTab.SETTINGS)
-      "graphify" -> {
-        runGraphify()
-      }
-      "ponytail", "review" -> {
-        runPonytail()
-      }
-      "superpower" -> {
-        viewModelScope.launch {
-          val goal = args.ifBlank { "Autonomous Test-Driven Feature" }
-          val result = agentEngine.superpowerEngine.executeSuperpowerLoop(goal)
-          val sysMsg = ChatMessage(
-            id = UUID.randomUUID().toString(),
-            sender = "system",
-            text = result.finalSummary,
-            mode = session.agentMode,
-            toolCalls = result.steps.mapNotNull { it.toolCall }
-          )
-          updateSessionMessages(session.id) { it + sysMsg }
-        }
-      }
-      "mem0", "memory" -> {
-        val subcmd = args.lowercase().trim()
-        val sysMsg = when {
-          subcmd.startsWith("add ") -> {
-            val text = subcmd.removePrefix("add ").trim()
-            mem0Engine.add(text, "fact")
-            ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "Mem0: Stored long-term memory: \"$text\"", mode = session.agentMode)
-          }
-          subcmd == "clear" -> {
-            mem0Engine.clearAll()
-            ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "Mem0: Cleared all long-term memories.", mode = session.agentMode)
-          }
-          else -> {
-            val memories = mem0Engine.memories.value
-            val listText = if (memories.isEmpty()) {
-              "Mem0: No long-term memories recorded yet. Use `/mem0 add <text>` or chat with the agent."
-            } else {
-              "### Mem0 Long-Term Memory Store (${memories.size} memories):\n" +
-                memories.joinToString("\n") { "• [${it.category.uppercase()}] ${it.memory}" }
-            }
-            ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = listText, mode = session.agentMode)
-          }
-        }
-        updateSessionMessages(session.id) { it + sysMsg }
-      }
-      "composio" -> {
-        val composioArgs = args.split("\\s+".toRegex()).filter { it.isNotBlank() }
-        val out = composioManager.handleCliCommand(composioArgs)
-        val sysMsg = ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "```\n$out\n```", mode = session.agentMode)
-        updateSessionMessages(session.id) { it + sysMsg }
-      }
+      "context", "memory" -> setTab(AppTab.KNOWLEDGE)
+      "config", "settings" -> setTab(AppTab.SETTINGS)
       "doctor" -> {
         val info = deviceInfo
         val vm = _uiState.value.vmConfig
-        val msg = """OpenCode Doctor Diagnostics:
-- Device RAM: ${info.totalRamMb} MB (Available: ${info.availableRamMb} MB)
-- Device Storage: ${info.totalStorageGb} GB (Free: ${info.availableStorageGb} GB)
-- VM Sandbox: ${vm.allocatedRamMb} MB RAM • ${vm.allocatedDiskGb} GB Storage
-- CPU: ${info.cpuCores} cores (${info.architecture})
-- OS: Ubuntu Server 26.04.1 LTS (ARM64 Server Essential - aarch64)
-- Package: /usr/local/bin/opencode (Debian stable linux-x64-deb / aarch64 native)
-- Tooling: Composio Engine v0.8.2 Active (${composioManager.connectedApps.value.count { it.isConnected }} connected tools)
-- Long-Term Memory: Mem0 Active (${mem0Engine.memories.value.size} memories compiled)
-- Free Model: ${_uiState.value.preferredModel} [BIGPICKLE DEFAULT - FREE]
-- System Health: 100% Operational (Isolated Sandbox)"""
+        val st = runtime.status.value
+        val msg = """### OpenDroid Doctor Diagnostics:
+- **Device Hardware**: ${info.totalRamMb} MB Total RAM (${info.availableRamMb} MB Available)
+- **Host Storage**: ${info.totalStorageGb} GB Total (${info.availableStorageGb} GB Free)
+- **CPU Platform**: ${info.cpuCores} cores (${info.architecture})
+- **Sandbox Rootfs**: Ubuntu 26.04.1 LTS ARM64 (PRoot user-space fake-root)
+- **Daemon Status**: Autonomous Engine: ${if (st.openCodeRunning) "RUNNING (127.0.0.1:4096)" else "STOPPED"} • Mem0 Server: ${if (st.mem0Running) "RUNNING (127.0.0.1:8765)" else "STOPPED"}
+- **Watchdog RSS**: ${st.rssMb} MB used / ${vm.allocatedRamMb} MB budget
+- **Composio Key**: ${if (secretStore.getComposioKey().isNullOrBlank()) "NOT CONFIGURED" else "CONFIGURED"}
+- **Mem0 LLM Key**: ${if (secretStore.getMem0ApiKey().isNullOrBlank()) "NOT CONFIGURED" else "CONFIGURED"}"""
         val sysMsg = ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = msg, mode = session.agentMode)
         updateSessionMessages(session.id) { it + sysMsg }
       }
-      "cost" -> {
-        val sysMsg = ChatMessage(
-          id = UUID.randomUUID().toString(),
-          sender = "system",
-          text = "OpenCode Catalog Cost: $0.00 (Exclusively Free Tier Models). No credit card or paid balance required.",
-          mode = session.agentMode
-        )
-        updateSessionMessages(session.id) { it + sysMsg }
+      "mem0" -> {
+        viewModelScope.launch(Dispatchers.IO) {
+          val subcmd = args.lowercase().trim()
+          val sysMsg = when {
+            subcmd.startsWith("add ") -> {
+              val text = subcmd.removePrefix("add ").trim()
+              memoryClient.addMemory(text, "fact")
+              refreshMemories()
+              ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "Mem0: Stored long-term memory: \"$text\"", mode = session.agentMode)
+            }
+            subcmd == "clear" -> {
+              memoryClient.clearAll()
+              refreshMemories()
+              ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "Mem0: Cleared all long-term memories.", mode = session.agentMode)
+            }
+            else -> {
+              refreshMemories()
+              val memories = _mem0Memories.value
+              val listText = if (memories.isEmpty()) {
+                "Mem0: No long-term memories recorded yet. Use `/mem0 add <text>` or chat with OpenDroid."
+              } else {
+                "### Mem0 Long-Term Memory Store (${memories.size} memories):\n" +
+                  memories.joinToString("\n") { "• [${it.category.uppercase()}] ${it.memory}" }
+              }
+              ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = listText, mode = session.agentMode)
+            }
+          }
+          updateSessionMessages(session.id) { it + sysMsg }
+        }
+      }
+      "composio" -> {
+        viewModelScope.launch(Dispatchers.IO) {
+          val key = secretStore.getComposioKey()
+          val text = if (key.isNullOrBlank()) {
+            "Composio API key not set. Configure your Composio API key in the Config tab."
+          } else {
+            val sessionsResult = composioClient.listSessions()
+            sessionsResult.fold(
+              onSuccess = { list ->
+                "### Composio Tool Router (${list.size} active sessions):\n" +
+                  list.joinToString("\n") { "• Session `${it.id}`: MCP URL = ${it.mcpUrl ?: "N/A"}" }
+              },
+              onFailure = { err -> "Composio error: ${err.localizedMessage}" }
+            )
+          }
+          val sysMsg = ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = text, mode = session.agentMode)
+          updateSessionMessages(session.id) { it + sysMsg }
+        }
       }
       "test" -> {
-        val entry = ubuntuSandbox.executeCommand("test")
-        val sysMsg = ChatMessage(
-          id = UUID.randomUUID().toString(),
-          sender = "system",
-          text = "```\n${entry.output}\n```",
-          mode = session.agentMode
-        )
-        updateSessionMessages(session.id) { it + sysMsg }
+        viewModelScope.launch(Dispatchers.IO) {
+          val entry = terminalManager.execute("pytest || npm test || echo 'No test suite discovered in /root/workspace'")
+          val sysMsg = ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "```\n${entry.output}\n```", mode = session.agentMode)
+          updateSessionMessages(session.id) { it + sysMsg }
+        }
       }
       "clear" -> {
         updateSessionMessages(session.id) { emptyList() }
@@ -508,22 +544,17 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
         val helpMsg = ChatMessage(
           id = UUID.randomUUID().toString(),
           sender = "system",
-          text = """OpenCode Slash Commands & Skills:
-- `/build` : Switch to Build mode (file editing & execution)
+          text = """### OpenDroid Slash Commands & Capabilities:
+- `/build` : Switch to Build mode (file editing & sandbox execution)
 - `/plan`  : Switch to Plan mode (architectural design)
-- `/mem0`  : Inspect or manage Mem0 long-term memory
-- `/graphify` : Visual code graph & dependency trees
-- `/ponytail` : Automated code review & anti-pattern linter
-- `/superpower <goal>` : Autonomous TDD & self-healing supervisor
-- `/terminal`: Open Ubuntu Server 26.04.1 LTS ARM64 sandbox
-- `/files` : Workspace file explorer & code editor
-- `/diff`  : Inspect modified file diffs
-- `/context`: Universal persistent knowledge base
-- `/doctor`: Run VM sandbox diagnostics
-- `/import` / `/export`: Android ⇄ Ubuntu file transfers
-- `/test`  : Run automated test suite
-- `/clear` : Clear current timeline
-- `/cost`  : Verify free catalog zero-cost status""",
+- `/terminal`: Open real Ubuntu 26.04.1 LTS ARM64 bash shell
+- `/files` : Open workspace explorer & programmer IDE
+- `/diff`  : Inspect unified Git diffs
+- `/mem0`  : Query or manage Mem0 long-term memories
+- `/composio`: Inspect Composio tool router sessions
+- `/doctor`: Run device hardware & daemon health check
+- `/test`  : Run project test runner in sandbox
+- `/clear` : Clear timeline messages""",
           mode = session.agentMode
         )
         updateSessionMessages(session.id) { it + helpMsg }
@@ -532,7 +563,7 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
         val unknownMsg = ChatMessage(
           id = UUID.randomUUID().toString(),
           sender = "system",
-          text = "Unknown slash command `/$cmd`. Type `/` in the input box to browse all OpenCode commands and skills.",
+          text = "Unknown command `/$cmd`. Type `/help` or `/` to view all OpenDroid commands.",
           mode = session.agentMode
         )
         updateSessionMessages(session.id) { it + unknownMsg }
@@ -555,5 +586,9 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
     updateSessionMessages(sessionId) { list ->
       list.map { if (it.id == msgId) transform(it) else it }
     }
+  }
+
+  override fun onCleared() {
+    super.onCleared()
   }
 }
