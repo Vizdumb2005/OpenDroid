@@ -17,8 +17,8 @@ android {
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-    // proot + Ubuntu arm64 rootfs only run on 64-bit ARM.
-    ndk { abiFilters += "arm64-v8a" }
+    // proot runs natively on 64-bit ARM devices and x86_64 emulators.
+    ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
   }
 
   packaging {

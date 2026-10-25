@@ -492,8 +492,9 @@ fun SandboxInstallerScreen(
 
         Spacer(modifier = Modifier.height(4.dp))
 
+        val archName = if (android.os.Build.SUPPORTED_ABIS.firstOrNull()?.contains("x86") == true) "x86_64" else "ARM64"
         Text(
-          text = "Official Ubuntu 26.04.1 LTS (ARM64) User-Space PRoot Environment",
+          text = "Official Ubuntu 26.04.1 LTS ($archName) User-Space PRoot Environment",
           style = MaterialTheme.typography.labelSmall,
           color = TextSecondary,
           fontSize = 11.sp

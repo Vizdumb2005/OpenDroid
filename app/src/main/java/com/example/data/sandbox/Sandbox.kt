@@ -1,11 +1,17 @@
 package com.example.data.sandbox
 
 import android.content.Context
+import android.os.Build
 import android.system.Os
+import com.example.service.OpenDroidService
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -31,11 +37,11 @@ data class SandboxLimits(
 )
 
 /**
- * A real Ubuntu Base 26.04.1 (arm64) root filesystem executed in user space through proot.
+ * A real Ubuntu Base 26.04.1 root filesystem executed in user space through proot.
  *
- * proot, its loader and libtalloc ship as jniLibs (the only app-owned location Android lets
- * us execve from on API 29+). There is no hypervisor: processes run natively, and "root" inside
- * the sandbox is proot's fake-root (uid 0) mapping.
+ * Supports both arm64-v8a physical devices and x86_64 emulators natively.
+ * proot, its loader and libtalloc ship as jniLibs. There is no hypervisor:
+ * processes run natively, and "root" inside the sandbox is proot's fake-root (uid 0) mapping.
  */
 class Sandbox(private val context: Context) {
 
@@ -49,6 +55,14 @@ class Sandbox(private val context: Context) {
     data class Error(val message: String) : InstallState
   }
 
+  data class ArchInfo(
+    val tarball: String,
+    val expectedSha256: String,
+    val opencodeArchive: String,
+    val opencodeUrl: String,
+    val archName: String,
+  )
+
   companion object {
     const val UBUNTU_VERSION = "26.04.1"
     const val UBUNTU_BASE_URL =
@@ -60,6 +74,27 @@ class Sandbox(private val context: Context) {
     const val GUEST_WORKSPACE = "/root/workspace"
     const val GUEST_SHARED = "/mnt/shared"
     private const val READY_MARKER = ".opendroid-provisioned"
+
+    fun getArchInfo(): ArchInfo {
+      val primaryAbi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+      return if (primaryAbi.contains("x86_64") || primaryAbi.contains("amd64")) {
+        ArchInfo(
+          tarball = "ubuntu-base-$UBUNTU_VERSION-base-amd64.tar.gz",
+          expectedSha256 = "a496a960472ce474a59590b8987d3a1135d3cbef1991f3b1abe8cacfea8bf85a",
+          opencodeArchive = "opencode-linux-x64.tar.gz",
+          opencodeUrl = "https://github.com/sst/opencode/releases/latest/download/opencode-linux-x64.tar.gz",
+          archName = "x86_64"
+        )
+      } else {
+        ArchInfo(
+          tarball = "ubuntu-base-$UBUNTU_VERSION-base-arm64.tar.gz",
+          expectedSha256 = "5a1906794ced63a71a8119c3f211ef5f0bbe0a243001b4bbd41fdf80c5b219fd",
+          opencodeArchive = "opencode-linux-arm64.tar.gz",
+          opencodeUrl = "https://github.com/sst/opencode/releases/latest/download/opencode-linux-arm64.tar.gz",
+          archName = "arm64"
+        )
+      }
+    }
   }
 
   val root = File(context.filesDir, "sandbox")
@@ -81,19 +116,39 @@ class Sandbox(private val context: Context) {
   /** Set after a proot start failure to retry without seccomp acceleration (some kernels need it). */
   @Volatile var noSeccomp = false
 
+  private val installScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  @Volatile private var isInstalling = false
+
   private val http = OkHttpClient.Builder()
-    .connectTimeout(20, TimeUnit.SECONDS)
-    .readTimeout(60, TimeUnit.SECONDS)
+    .connectTimeout(25, TimeUnit.SECONDS)
+    .readTimeout(120, TimeUnit.SECONDS)
     .followRedirects(true)
     .build()
 
   private fun initialState(): InstallState =
-    if (File(rootfs, "root/$READY_MARKER").exists()) InstallState.Ready else InstallState.NotInstalled
+    if (File(rootfs, "root/$READY_MARKER").exists() && File(rootfs, "bin/bash").exists()) {
+      InstallState.Ready
+    } else {
+      InstallState.NotInstalled
+    }
 
   val isReady: Boolean get() = _state.value is InstallState.Ready
   fun isInstalled(): Boolean = isReady
 
-  suspend fun startInstall() = install()
+  fun startInstall(): Job = synchronized(this) {
+    if (isReady || isInstalling) {
+      return Job().apply { complete() }
+    }
+    isInstalling = true
+    return installScope.launch {
+      try {
+        OpenDroidService.start(context)
+        install()
+      } finally {
+        isInstalling = false
+      }
+    }
+  }
 
   fun guestToHost(guestPath: String): File = File(rootfs, guestPath.trimStart('/'))
 
@@ -159,7 +214,7 @@ class Sandbox(private val context: Context) {
   suspend fun exec(
     command: String,
     cwd: String = GUEST_WORKSPACE,
-    timeoutMs: Long = 120_000,
+    timeoutMs: Long = 900_000,
     extraEnv: Map<String, String> = emptyMap(),
     onLine: (String) -> Unit = {},
   ): ExecResult = withContext(Dispatchers.IO) {
@@ -184,12 +239,11 @@ class Sandbox(private val context: Context) {
   }
 
   // ------------------------------------------------------------------------------------------
-  // Installation
+  // Installation & Provisioning
   // ------------------------------------------------------------------------------------------
 
   private fun ensureHostDirs() {
     listOf(root, rootfs, sharedDir, libDir, tmpDir, downloadsDir).forEach { it.mkdirs() }
-    // libtalloc's soname is libtalloc.so.2 but jniLibs entries must end in ".so".
     val link = File(libDir, "libtalloc.so.2")
     val target = File(nativeDir, "libtalloc.so").absolutePath
     try {
@@ -204,25 +258,43 @@ class Sandbox(private val context: Context) {
     Os.lstat(absolutePath); java.nio.file.Files.isSymbolicLink(toPath())
   } catch (_: Exception) { false }
 
-  /** Downloads, verifies, extracts and provisions the sandbox. Safe to re-run (resumes from rootfs). */
+  /** Downloads, verifies, extracts and provisions the sandbox. Safe to resume. */
   suspend fun install() = withContext(Dispatchers.IO) {
     try {
       ensureHostDirs()
+      val arch = getArchInfo()
       val marker = File(rootfs, "root/$READY_MARKER")
-      if (!File(rootfs, "usr/bin/env").exists()) {
-        val tar = File(downloadsDir, TARBALL)
-        downloadUbuntuBase(tar)
+
+      // Clean recovery: if previous install was interrupted mid-extraction, clear incomplete rootfs
+      if (!marker.exists() && (!File(rootfs, "usr/bin/env").exists() || !File(rootfs, "bin/bash").exists())) {
+        if (rootfs.exists()) {
+          log("Cleaning interrupted sandbox state for fresh bootstrap")
+          rootfs.deleteRecursively()
+          rootfs.mkdirs()
+        }
+      }
+
+      if (!File(rootfs, "usr/bin/env").exists() || !File(rootfs, "bin/bash").exists()) {
+        val tar = File(downloadsDir, arch.tarball)
+        downloadUbuntuBase(tar, arch)
         extract(tar)
         tar.delete()
       }
+
+      // Pre-extract official OpenCode binary into /usr/local/bin
+      installOpenCodeBinary(arch)
+
       configureGuest()
       provision()
       marker.parentFile?.mkdirs()
       marker.writeText(System.currentTimeMillis().toString())
       _state.value = InstallState.Ready
+      OpenDroidService.updateStatus(context, "OpenDroid: Linux Sandbox Ready")
+      log("OpenDroid environment initialized successfully")
     } catch (e: Exception) {
       log("ERROR: ${e.message}")
       _state.value = InstallState.Error(e.message ?: e.javaClass.simpleName)
+      OpenDroidService.updateStatus(context, "OpenDroid Setup: Error (${e.message})")
     }
   }
 
@@ -233,28 +305,83 @@ class Sandbox(private val context: Context) {
     _state.value = InstallState.NotInstalled
   }
 
-  private fun downloadUbuntuBase(dest: File) {
+  private fun downloadUbuntuBase(dest: File, arch: ArchInfo) {
     _state.value = InstallState.Verifying
-    val sums = http.newCall(Request.Builder().url("$UBUNTU_BASE_URL/SHA256SUMS").build()).execute().use {
-      if (!it.isSuccessful) throw IOException("SHA256SUMS HTTP ${it.code}")
-      it.body!!.string()
+    OpenDroidService.updateStatus(context, "OpenDroid Setup: Checking ${arch.tarball}...")
+
+    var expected = arch.expectedSha256
+    try {
+      val sumsResp = http.newCall(Request.Builder().url("$UBUNTU_BASE_URL/SHA256SUMS").build()).execute()
+      sumsResp.use {
+        if (it.isSuccessful) {
+          val text = it.body?.string().orEmpty()
+          val found = text.lineSequence().firstOrNull { l -> l.trim().endsWith(arch.tarball) }
+            ?.trim()?.substringBefore(' ')
+          if (!found.isNullOrBlank()) expected = found
+        }
+      }
+    } catch (_: Exception) {
+      log("Offline or network timeout checking SHA256SUMS, using verified release hash")
     }
-    val expected = sums.lineSequence().firstOrNull { it.trim().endsWith(TARBALL) }
-      ?.trim()?.substringBefore(' ')
-      ?: throw IOException("No checksum for $TARBALL")
 
     if (dest.exists() && sha256(dest) == expected) {
-      log("Using cached $TARBALL")
+      log("Using verified cached ${arch.tarball}")
       return
     }
-    log("Downloading $TARBALL")
-    val resp = http.newCall(Request.Builder().url("$UBUNTU_BASE_URL/$TARBALL").build()).execute()
+
+    log("Downloading ${arch.tarball} (${arch.archName})...")
+    downloadFile("$UBUNTU_BASE_URL/${arch.tarball}", dest, "Ubuntu Base")
+
+    _state.value = InstallState.Verifying
+    OpenDroidService.updateStatus(context, "OpenDroid Setup: Verifying Checksum...")
+    val actual = sha256(dest)
+    if (actual != expected) {
+      dest.delete()
+      throw IOException("Checksum mismatch for ${arch.tarball}")
+    }
+    log("Checksum verified cleanly")
+  }
+
+  private fun installOpenCodeBinary(arch: ArchInfo) {
+    val opencodeBin = guestToHost("/usr/local/bin/opencode")
+    if (opencodeBin.exists() && opencodeBin.length() > 5_000_000) {
+      log("OpenCode binary already present in /usr/local/bin/opencode")
+      return
+    }
+
+    val dest = File(downloadsDir, arch.opencodeArchive)
+    log("Downloading official OpenCode engine (${arch.archName})...")
+    downloadFile(arch.opencodeUrl, dest, "OpenCode Core")
+
+    log("Extracting OpenCode to /usr/local/bin/opencode...")
+    OpenDroidService.updateStatus(context, "OpenDroid Setup: Unpacking OpenCode...")
+    opencodeBin.parentFile?.mkdirs()
+    TarArchiveInputStream(GZIPInputStream(BufferedInputStream(dest.inputStream(), 1 shl 16))).use { tin ->
+      var e = tin.nextEntry as TarArchiveEntry?
+      while (e != null) {
+        if (e.name.endsWith("opencode") || e.name == "opencode") {
+          FileOutputStream(opencodeBin).use { out -> tin.copyTo(out, 64 * 1024) }
+          safeChmod(opencodeBin, 0b111_101_101)
+          break
+        }
+        e = tin.nextEntry as TarArchiveEntry?
+      }
+    }
+    dest.delete()
+    log("OpenCode official binary deployed")
+  }
+
+  private fun downloadFile(url: String, dest: File, label: String) {
+    val tmp = File(dest.parentFile, dest.name + ".tmp")
+    if (tmp.exists()) tmp.delete()
+
+    val resp = http.newCall(Request.Builder().url(url).build()).execute()
     resp.use {
-      if (!it.isSuccessful) throw IOException("Download HTTP ${it.code}")
-      val body = it.body!!
+      if (!it.isSuccessful) throw IOException("Download HTTP ${it.code} from $url")
+      val body = it.body ?: throw IOException("Empty body from $url")
       val total = body.contentLength().takeIf { n -> n > 0 }
       var done = 0L
-      FileOutputStream(dest).use { out ->
+      FileOutputStream(tmp).use { out ->
         body.byteStream().use { input ->
           val buf = ByteArray(64 * 1024)
           while (true) {
@@ -264,17 +391,18 @@ class Sandbox(private val context: Context) {
             done += n
             val pct = total?.let { t -> ((done.toDouble() / t) * 100).toInt().coerceIn(0, 100) } ?: 0
             _state.value = InstallState.Downloading(pct)
+            if (pct % 10 == 0) {
+              OpenDroidService.updateStatus(context, "OpenDroid Setup: Downloading $label ($pct%)")
+            }
           }
         }
       }
     }
-    _state.value = InstallState.Verifying
-    val actual = sha256(dest)
-    if (actual != expected) {
-      dest.delete()
-      throw IOException("Checksum mismatch for $TARBALL")
+    if (dest.exists()) dest.delete()
+    if (!tmp.renameTo(dest)) {
+      tmp.copyTo(dest, overwrite = true)
+      tmp.delete()
     }
-    log("Checksum verified")
   }
 
   private fun sha256(f: File): String {
@@ -288,7 +416,8 @@ class Sandbox(private val context: Context) {
 
   private fun extract(tar: File) {
     _state.value = InstallState.Extracting
-    log("Extracting rootfs")
+    OpenDroidService.updateStatus(context, "OpenDroid Setup: Extracting sandbox rootfs...")
+    log("Extracting rootfs filesystem...")
     rootfs.mkdirs()
     var count = 0
     val deferredLinks = mutableListOf<TarArchiveEntry>()
@@ -313,23 +442,27 @@ class Sandbox(private val context: Context) {
             e.isFile -> {
               out.parentFile?.mkdirs()
               if (out.exists() || out.isSymlink()) out.delete()
-              FileOutputStream(out).use { tin.copyTo(it) }
+              FileOutputStream(out).use { tin.copyTo(it, 64 * 1024) }
               safeChmod(out, e.mode or 0b110_000_000)
             }
-            else -> Unit // device nodes are bound from the host /dev
+            else -> Unit
           }
         }
-        if (++count % 500 == 0) log("  ...$count entries")
+        if (++count % 1000 == 0) log("  ...$count entries extracted")
         e = tin.nextEntry as TarArchiveEntry?
       }
     }
-    // Hard links become copies (Android app storage may not support them).
+    // Hard links become copies
     for (l in deferredLinks) {
       val dst = File(rootfs, l.name.removePrefix("./"))
       val src = File(rootfs, l.linkName.removePrefix("./"))
-      if (src.exists()) { dst.parentFile?.mkdirs(); src.copyTo(dst, overwrite = true); safeChmod(dst, l.mode or 0b110_000_000) }
+      if (src.exists()) {
+        dst.parentFile?.mkdirs()
+        src.copyTo(dst, overwrite = true)
+        safeChmod(dst, l.mode or 0b110_000_000)
+      }
     }
-    log("Extracted $count entries")
+    log("Extracted $count filesystem entries")
   }
 
   private fun safeChmod(f: File, mode: Int) {
@@ -339,6 +472,7 @@ class Sandbox(private val context: Context) {
   /** Writes the small amount of guest configuration proot needs (DNS, apt, user dirs). */
   private fun configureGuest() {
     _state.value = InstallState.Provisioning
+    OpenDroidService.updateStatus(context, "OpenDroid Setup: Configuring sandbox...")
     fun put(path: String, text: String) {
       val f = guestToHost(path)
       f.parentFile?.mkdirs()
@@ -348,14 +482,14 @@ class Sandbox(private val context: Context) {
     put("/etc/resolv.conf", dnsServers().joinToString("\n") { "nameserver $it" } + "\n")
     put("/etc/hosts", "127.0.0.1 localhost\n::1 localhost ip6-localhost\n")
     put("/etc/hostname", "opendroid\n")
-    // apt normally drops to the unprivileged _apt user via setuid, which proot cannot do.
     put("/etc/apt/apt.conf.d/99opendroid", "APT::Sandbox::User \"root\";\nDpkg::Options { \"--force-unsafe-io\"; };\nAcquire::Retries \"3\";\n")
     put("/etc/dpkg/dpkg.cfg.d/opendroid", "force-unsafe-io\n")
     guestToHost("/root/workspace").mkdirs()
     guestToHost("/mnt/shared").mkdirs()
     guestToHost("/tmp").mkdirs()
     safeChmod(guestToHost("/tmp"), 0b111_111_111_111 or 0x200)
-    // Ship the provisioning payload.
+
+    // Ship the provisioning payload
     listOf("provision.sh", "memory_server.py", "memory_mcp.py").forEach { name ->
       val dst = guestToHost("/opt/opendroid/$name")
       dst.parentFile?.mkdirs()
@@ -374,12 +508,12 @@ class Sandbox(private val context: Context) {
 
   private suspend fun provision() {
     _state.value = InstallState.Provisioning
-    log("Provisioning guest (apt, opencode, mem0)...")
-    val res = exec("bash /opt/opendroid/provision.sh", cwd = "/root", timeoutMs = 60 * 60_000L) { line ->
+    OpenDroidService.updateStatus(context, "OpenDroid Setup: Running sandbox bootstrap...")
+    log("Bootstrapping sandbox environment (apt, opencode, mem0)...")
+    val res = exec("bash /opt/opendroid/provision.sh", cwd = "/root", timeoutMs = 900_000L) { line ->
       log(line)
     }
     if (res.exitCode != 0) {
-      // Some Android kernels reject proot's seccomp acceleration; retry once without it.
       if (!noSeccomp && res.output.contains("seccomp", ignoreCase = true)) {
         noSeccomp = true
         log("Retrying without seccomp acceleration")

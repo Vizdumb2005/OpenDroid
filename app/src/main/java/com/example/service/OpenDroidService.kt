@@ -23,6 +23,8 @@ class OpenDroidService : Service() {
     const val NOTIFICATION_ID = 5050
     const val ACTION_START = "ACTION_START_OPENDROID_SERVICE"
     const val ACTION_STOP = "ACTION_STOP_OPENDROID_SERVICE"
+    const val ACTION_UPDATE_STATUS = "ACTION_UPDATE_STATUS_OPENDROID_SERVICE"
+    const val EXTRA_STATUS = "EXTRA_STATUS"
 
     fun startService(context: Context) {
       val intent = Intent(context, OpenDroidService::class.java).apply {
@@ -44,6 +46,20 @@ class OpenDroidService : Service() {
 
     fun start(context: Context) = startService(context)
     fun stop(context: Context) = stopService(context)
+
+    fun updateStatus(context: Context, statusText: String) {
+      val intent = Intent(context, OpenDroidService::class.java).apply {
+        action = ACTION_UPDATE_STATUS
+        putExtra(EXTRA_STATUS, statusText)
+      }
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          context.startForegroundService(intent)
+        } else {
+          context.startService(intent)
+        }
+      } catch (_: Exception) {}
+    }
   }
 
   private var wakeLock: PowerManager.WakeLock? = null
@@ -73,7 +89,12 @@ class OpenDroidService : Service() {
     }
 
     acquireLocks()
-    val notification = buildNotification("Linux sandbox runtime active in background")
+    val statusText = if (intent?.action == ACTION_UPDATE_STATUS) {
+      intent.getStringExtra(EXTRA_STATUS) ?: "Linux sandbox active"
+    } else {
+      "Linux sandbox runtime active in background"
+    }
+    val notification = buildNotification(statusText)
     startForeground(NOTIFICATION_ID, notification)
     return START_STICKY
   }
@@ -81,7 +102,7 @@ class OpenDroidService : Service() {
   fun updateStatus(statusText: String) {
     val notification = buildNotification(statusText)
     val manager = getSystemService(NotificationManager::class.java)
-    manager.notify(NOTIFICATION_ID, notification)
+    manager?.notify(NOTIFICATION_ID, notification)
   }
 
   private fun acquireLocks() {

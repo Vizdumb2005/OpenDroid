@@ -130,13 +130,15 @@ Type **`/`** to explore OpenDroid slash commands, or ask me to build, code, run,
       )
     }
 
-    // Initialize sandbox and runtime asynchronously
+    // Observe sandbox state reactively and start daemons when ready
     viewModelScope.launch(Dispatchers.IO) {
-      if (sandbox.isInstalled()) {
-        knowledgeRepository.loadDirectives()
-        runtime.startAll()
-        workspaceRepository.refreshFiles()
-        refreshMemories()
+      sandbox.state.collect { state ->
+        if (state is Sandbox.InstallState.Ready) {
+          knowledgeRepository.loadDirectives()
+          runtime.startAll()
+          workspaceRepository.refreshFiles()
+          refreshMemories()
+        }
       }
     }
   }
@@ -145,15 +147,7 @@ Type **`/`** to explore OpenDroid slash commands, or ask me to build, code, run,
     get() = _uiState.value.sessions.find { it.id == _uiState.value.activeSessionId }
 
   fun triggerSandboxInstall() {
-    viewModelScope.launch(Dispatchers.IO) {
-      sandbox.startInstall()
-      if (sandbox.isInstalled()) {
-        knowledgeRepository.loadDirectives()
-        runtime.startAll()
-        workspaceRepository.refreshFiles()
-        refreshMemories()
-      }
-    }
+    sandbox.startInstall()
   }
 
   fun setTab(tab: AppTab) {

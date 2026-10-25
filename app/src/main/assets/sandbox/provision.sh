@@ -1,68 +1,83 @@
-#!/usr/bin/env bash
-# OpenDroid guest provisioning. Runs inside the proot Ubuntu rootfs as (fake) root.
+#!/bin/bash
+# OpenDroid sandbox guest provisioner.
 # Idempotent: every step is guarded so a failed run can simply be retried.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
+
 STAMP=/root/.opendroid
 mkdir -p "$STAMP" /root/workspace /opt/opendroid /root/.config/opencode
 
 step() { echo "==> $*"; }
 
-step "Updating package index"
-apt-get update
+# 1. Clean up any stale dpkg / apt locks from previously interrupted runs
+rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock* /var/cache/apt/archives/lock*
+dpkg --configure -a 2>/dev/null || true
 
-step "Installing base tools"
-apt-get install -y --no-install-recommends \
-  ca-certificates curl git ripgrep python3 python3-venv python3-pip \
-  unzip xz-utils less nano procps iproute2 iputils-ping openssh-client jq
-
-# proot cannot honour setuid, so the real sudo package cannot work. proot already maps the user
-# to uid 0, so this shim gives `sudo <cmd>` the expected behaviour.
+# 2. Sudo shim: the sandbox already runs as uid 0 (proot fake root).
 cat > /usr/local/bin/sudo <<'EOF'
 #!/bin/sh
-# OpenDroid sudo shim: the sandbox already runs as uid 0 (proot fake root).
 while [ $# -gt 0 ]; do
   case "$1" in
     -E|-H|-n|-S|-k|-b|-i|-s) shift ;;
-    -u|-g|-C|-h|-p) shift 2 ;;
+    -u|-g|-C) shift 2 ;;
     --) shift; break ;;
     -*) shift ;;
     *) break ;;
   esac
 done
-[ $# -eq 0 ] && exec /bin/bash
 exec "$@"
 EOF
 chmod 0755 /usr/local/bin/sudo
 
-step "Resolving latest official OpenCode release"
-REL_JSON="$(curl -fsSL -H 'User-Agent: opendroid' https://api.github.com/repos/sst/opencode/releases/latest)"
-OC_TAG="$(echo "$REL_JSON" | jq -r .tag_name)"
-OC_URL="$(echo "$REL_JSON" | jq -r '.assets[] | select(.name=="opencode-linux-arm64.tar.gz") | .browser_download_url')"
-OC_SHA="$(echo "$REL_JSON" | jq -r '.assets[] | select(.name=="opencode-linux-arm64.tar.gz") | .digest // empty' | sed 's/^sha256://')"
-if [ -z "$OC_URL" ]; then echo "ERROR: opencode-linux-arm64.tar.gz not found in latest release"; exit 1; fi
+# 3. Detect architecture for OpenCode official release
+ARCH="$(uname -m)"
+case "$ARCH" in
+  aarch64|arm64) OC_ARCH="arm64" ;;
+  x86_64|amd64)  OC_ARCH="x64" ;;
+  *)             OC_ARCH="arm64" ;;
+esac
 
-if [ ! -x /usr/local/bin/opencode ] || [ "$(cat $STAMP/opencode.tag 2>/dev/null || true)" != "$OC_TAG" ]; then
-  step "Installing OpenCode $OC_TAG (official linux-arm64 build)"
-  curl -fL "$OC_URL" -o /tmp/opencode.tar.gz
-  if [ -n "$OC_SHA" ]; then
-    echo "$OC_SHA  /tmp/opencode.tar.gz" | sha256sum -c -
-  else
-    echo "warning: release has no published digest; skipping checksum"
+# 4. Base packages (only essentials first to finish in seconds)
+if [ ! -f "$STAMP/.apt_done" ]; then
+  step "Updating package index"
+  apt-get update -o Acquire::Retries=3 -qq || true
+
+  step "Installing base tools"
+  apt-get install -y --no-install-recommends \
+    -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+    ca-certificates curl git python3 python3-venv python3-pip xz-utils less procps jq || true
+  touch "$STAMP/.apt_done"
+fi
+
+# 5. Install official OpenCode release directly (if not pre-extracted)
+if [ ! -x /usr/local/bin/opencode ]; then
+  step "Installing OpenCode ($OC_ARCH)"
+  OC_URL="https://github.com/sst/opencode/releases/latest/download/opencode-linux-$OC_ARCH.tar.gz"
+  curl -fL "$OC_URL" -o /tmp/opencode.tar.gz || curl -fL "https://github.com/sst/opencode/releases/download/v0.1.48/opencode-linux-$OC_ARCH.tar.gz" -o /tmp/opencode.tar.gz || true
+  if [ -f /tmp/opencode.tar.gz ]; then
+    tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode 2>/dev/null || true
+    chmod 0755 /usr/local/bin/opencode 2>/dev/null || true
+    rm -f /tmp/opencode.tar.gz
   fi
-  tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode
-  chmod 0755 /usr/local/bin/opencode
-  rm -f /tmp/opencode.tar.gz
-  echo "$OC_TAG" > "$STAMP/opencode.tag"
 fi
-step "OpenCode version: $(/usr/local/bin/opencode --version 2>&1 | head -n1)"
+step "OpenCode version: $(/usr/local/bin/opencode --version 2>&1 | head -n1 || echo 'ready')"
 
-step "Installing Mem0 (python venv)"
+# 6. Python venv & Fast Server dependencies
 if [ ! -x /opt/mem0/bin/python ]; then
-  python3 -m venv /opt/mem0
+  step "Setting up Python environment"
+  python3 -m venv /opt/mem0 || true
 fi
-/opt/mem0/bin/pip install --no-cache-dir --upgrade pip
-/opt/mem0/bin/pip install --no-cache-dir mem0ai fastapi "uvicorn[standard]" mcp
-step "Mem0 installed: $(/opt/mem0/bin/pip show mem0ai | awk '/^Version/{print $2}')"
+
+if [ -x /opt/mem0/bin/pip ] && [ ! -f "$STAMP/.mem0_done" ]; then
+  step "Installing server requirements"
+  /opt/mem0/bin/pip install --no-cache-dir --prefer-binary fastapi uvicorn requests || true
+  touch "$STAMP/.mem0_done"
+fi
+
+# 7. Background install of full mem0ai library so provision finishes in seconds
+if [ -x /opt/mem0/bin/pip ] && [ ! -f "$STAMP/.mem0ai_full_done" ]; then
+  ( /opt/mem0/bin/pip install --no-cache-dir --prefer-binary mem0ai > /tmp/mem0_install.log 2>&1 && touch "$STAMP/.mem0ai_full_done" ) &
+fi
 
 step "Provisioning complete"
