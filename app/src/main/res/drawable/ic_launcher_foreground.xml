@@ -1,0 +1,49 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Terminal window body -->
+    <path
+        android:fillColor="#1E2631"
+        android:strokeColor="#30363D"
+        android:strokeWidth="2"
+        android:pathData="M26,24 h56 a6,6 0 0,1 6,6 v48 a6,6 0 0,1 -6,6 h-56 a6,6 0 0,1 -6,-6 v-48 a6,6 0 0,1 6,-6 z" />
+
+    <!-- Terminal header divider -->
+    <path
+        android:strokeColor="#30363D"
+        android:strokeWidth="1.5"
+        android:pathData="M20,36 h68" />
+
+    <!-- Terminal header window dots -->
+    <path
+        android:fillColor="#F85149"
+        android:pathData="M27,30 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
+    <path
+        android:fillColor="#D29922"
+        android:pathData="M34,30 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
+    <path
+        android:fillColor="#3FB950"
+        android:pathData="M41,30 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
+
+    <!-- Terminal prompt chevron '>' -->
+    <path
+        android:strokeColor="#3FB950"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M33,47 L43,55 L33,63" />
+
+    <!-- Terminal blinking cursor '_' -->
+    <path
+        android:strokeColor="#58A6FF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M48,63 L60,63" />
+
+    <!-- AI Sparkle Star -->
+    <path
+        android:fillColor="#58A6FF"
+        android:pathData="M69,47 L71,43 L73,47 L77,49 L73,51 L71,55 L69,51 L65,49 Z" />
+</vector>

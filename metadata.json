@@ -1,0 +1,6 @@
+{
+  "name": "OpenCode",
+  "description": "Self-contained GUI port of OpenCode AI coding assistant for Android with dual-agent (Build & Plan) modes, interactive terminal, workspace editor, and git diffs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
