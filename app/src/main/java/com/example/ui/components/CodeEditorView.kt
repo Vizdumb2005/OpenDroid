@@ -55,6 +55,7 @@ import com.example.ui.theme.BuildGreenGlow
 import com.example.ui.theme.CodeBackground
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.JetBrainsMono
+import com.example.ui.theme.PlanPurpleGlow
 import com.example.ui.theme.SurfaceCard
 import com.example.ui.theme.SurfaceElevated
 import com.example.ui.theme.SyntaxComment
@@ -68,6 +69,9 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WarningOrange
 
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Terminal
+
 @Composable
 fun CodeEditorView(
   file: WorkspaceFile,
@@ -75,10 +79,12 @@ fun CodeEditorView(
   onRevert: () -> Unit,
   onClose: () -> Unit,
   onAskAgent: (String) -> Unit,
+  onRunFile: ((String) -> String)? = null,
   modifier: Modifier = Modifier
 ) {
   var editorContent by remember(file.path) { mutableStateOf(file.content) }
   val isDirty = editorContent != file.originalContent
+  var runOutput by remember(file.path) { mutableStateOf<String?>(null) }
 
   val verticalScroll = rememberScrollState()
   val horizontalScroll = rememberScrollState()
@@ -124,17 +130,36 @@ fun CodeEditorView(
       }
 
       Row(verticalAlignment = Alignment.CenterVertically) {
-        // Ask Agent Button
+        // Run in Sandbox Button
+        if (onRunFile != null) {
+          IconButton(
+            onClick = {
+              runOutput = onRunFile(file.path)
+            },
+            modifier = Modifier
+              .size(32.dp)
+              .testTag("editor_run_file_button")
+          ) {
+            Icon(
+              imageVector = Icons.Default.PlayArrow,
+              contentDescription = "Run in sandbox (ts-node/node/python)",
+              tint = BuildGreenGlow,
+              modifier = Modifier.size(18.dp)
+            )
+          }
+        }
+
+        // Ask Agent Button (AI sparkle)
         IconButton(
-          onClick = { onAskAgent("Refactor and review ${file.path}") },
+          onClick = { onAskAgent("Explain and review ${file.path}") },
           modifier = Modifier
             .size(32.dp)
             .testTag("editor_ask_agent_button")
         ) {
           Icon(
-            imageVector = Icons.Default.PlayArrow,
-            contentDescription = "Ask Agent",
-            tint = BuildGreenGlow,
+            imageVector = Icons.Default.AutoAwesome,
+            contentDescription = "Ask Agent to Review",
+            tint = PlanPurpleGlow,
             modifier = Modifier.size(16.dp)
           )
         }
@@ -239,6 +264,41 @@ fun CodeEditorView(
           modifier = Modifier
             .fillMaxWidth()
             .testTag("code_editor_input")
+        )
+      }
+    }
+
+    // Run Output Console
+    if (runOutput != null) {
+      Column(
+        modifier = Modifier
+          .fillMaxWidth()
+          .background(SurfaceElevated)
+          .border(1.dp, BuildGreenGlow.copy(alpha = 0.5f))
+          .padding(8.dp)
+      ) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Terminal, contentDescription = null, tint = BuildGreenGlow, modifier = Modifier.size(14.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Sandbox Output (${file.path})", color = BuildGreenGlow, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          }
+          IconButton(onClick = { runOutput = null }, modifier = Modifier.size(20.dp)) {
+            Icon(Icons.Default.Close, contentDescription = "Close output", tint = TextMuted, modifier = Modifier.size(12.dp))
+          }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+          text = runOutput ?: "",
+          fontFamily = JetBrainsMono,
+          fontSize = 11.sp,
+          color = TextPrimary,
+          lineHeight = 15.sp,
+          modifier = Modifier.fillMaxWidth()
         )
       }
     }

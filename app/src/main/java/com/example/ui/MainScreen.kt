@@ -75,6 +75,9 @@ fun MainScreen(
   val terminalEntries by viewModel.terminalEntries.collectAsState()
   val gitCommits by viewModel.gitCommits.collectAsState()
   val knowledgeItems by viewModel.knowledgeItems.collectAsState()
+  val mem0Memories by viewModel.mem0Memories.collectAsState()
+  val catalogModels by viewModel.catalogModels.collectAsState()
+  val activeProjectName by viewModel.activeProjectName.collectAsState()
 
   val activeSession = viewModel.activeSession
   val currentMode = activeSession?.agentMode ?: AgentMode.BUILD
@@ -377,6 +380,7 @@ fun MainScreen(
           WorkspaceScreen(
             files = workspaceFiles,
             selectedFile = uiState.selectedFile,
+            activeProjectName = activeProjectName,
             onSelectFile = { file -> viewModel.selectFile(file) },
             onSaveFile = { path, content -> viewModel.saveFileContent(path, content) },
             onRevertFile = { path -> viewModel.revertFile(path) },
@@ -388,7 +392,9 @@ fun MainScreen(
             onAskAgent = { prompt ->
               viewModel.setTab(AppTab.CHAT)
               viewModel.sendPrompt(prompt)
-            }
+            },
+            onRunFile = { path -> viewModel.runFileInSandbox(path) },
+            onSwitchProject = { name -> viewModel.switchProject(name) }
           )
         }
 
@@ -420,7 +426,11 @@ fun MainScreen(
             items = knowledgeItems,
             onAddItem = { title, content, cat -> viewModel.knowledgeRepository.addItem(title, content, cat) },
             onToggleItem = { id -> viewModel.knowledgeRepository.toggleItem(id) },
-            onDeleteItem = { id -> viewModel.knowledgeRepository.deleteItem(id) }
+            onDeleteItem = { id -> viewModel.knowledgeRepository.deleteItem(id) },
+            mem0Memories = mem0Memories,
+            onAddMem0Memory = { text, cat -> viewModel.addMem0Memory(text, cat) },
+            onDeleteMem0Memory = { id -> viewModel.deleteMem0Memory(id) },
+            onClearAllMem0 = { viewModel.clearAllMem0Memories() }
           )
         }
 
@@ -430,9 +440,12 @@ fun MainScreen(
             autoApproveTools = uiState.autoApproveTools,
             vmConfig = uiState.vmConfig,
             deviceInfo = viewModel.deviceInfo,
+            models = catalogModels,
             onUpdateModel = { model -> viewModel.updatePreferredModel(model) },
+            onToggleModelEnabled = { id -> viewModel.toggleModelEnabled(id) },
             onUpdateAutoApprove = { autoApprove -> viewModel.updateAutoApprove(autoApprove) },
-            onUpdateVmConfig = { config -> viewModel.updateVmConfig(config) }
+            onUpdateVmConfig = { config -> viewModel.updateVmConfig(config) },
+            composioManager = viewModel.composioManager
           )
         }
       }

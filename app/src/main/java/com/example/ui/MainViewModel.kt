@@ -5,7 +5,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.AgentResponseChunk
 import com.example.data.ai.OpenCodeAgentEngine
+import com.example.data.ai.OpenCodeModelCatalog
 import com.example.data.knowledge.UniversalKnowledgeRepository
+import com.example.data.memory.Mem0Engine
+import com.example.data.memory.Mem0Memory
 import com.example.data.model.AgentMode
 import com.example.data.model.AgentSession
 import com.example.data.model.ChatAttachment
@@ -32,6 +35,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+import com.example.data.composio.ComposioManager
+import com.example.data.memory.AgentMemoryCompiler
+import com.example.data.model.OpenCodeModel
+
 enum class AppTab(val title: String) {
   CHAT("Agent"),
   TERMINAL("Ubuntu LTS"),
@@ -50,7 +57,7 @@ data class MainUiState(
   val isGenerating: Boolean = false,
   val statusMessage: String? = null,
   val autoApproveTools: Boolean = true,
-  val preferredModel: String = "opencode/free-flash",
+  val preferredModel: String = "bigpickle",
   val commitMessageInput: String = "",
   val activeAttachments: List<ChatAttachment> = emptyList(),
   val vmConfig: VmConfig = VmConfig(),
@@ -60,39 +67,58 @@ data class MainUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
+  val composioManager: ComposioManager = ComposioManager()
+  val modelCatalog: OpenCodeModelCatalog = OpenCodeModelCatalog()
+  val mem0Engine: Mem0Engine = Mem0Engine(application)
   val workspaceRepository: WorkspaceRepository = WorkspaceRepository()
-  val ubuntuSandbox: UbuntuSandbox = UbuntuSandbox()
+  val ubuntuSandbox: UbuntuSandbox = UbuntuSandbox(mem0Engine = mem0Engine, composioManager = composioManager)
   val knowledgeRepository: UniversalKnowledgeRepository = UniversalKnowledgeRepository(application)
-  val agentEngine: OpenCodeAgentEngine = OpenCodeAgentEngine(workspaceRepository, ubuntuSandbox)
+  val agentEngine: OpenCodeAgentEngine = OpenCodeAgentEngine(
+    workspaceRepository = workspaceRepository,
+    ubuntuSandbox = ubuntuSandbox,
+    mem0Engine = mem0Engine,
+    composioManager = composioManager,
+    modelCatalog = modelCatalog
+  )
+  val memoryCompiler: AgentMemoryCompiler = AgentMemoryCompiler(mem0Engine, knowledgeRepository)
 
   val deviceInfo: DeviceHardwareInfo = HardwareAdvisor.getDeviceHardwareInfo(application)
 
-  private val _uiState = MutableStateFlow(MainUiState())
+  private val _uiState = MutableStateFlow(MainUiState(preferredModel = agentEngine.preferredModel))
   val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
+  val catalogModels: StateFlow<List<OpenCodeModel>> = modelCatalog.models
+  val activeProjectName: StateFlow<String> = workspaceRepository.activeProjectName
   val workspaceFiles: StateFlow<Map<String, WorkspaceFile>> = workspaceRepository.files
   val sandboxFiles: StateFlow<Map<String, SandboxFile>> = ubuntuSandbox.files
   val terminalEntries: StateFlow<List<TerminalEntry>> = ubuntuSandbox.terminalHistory
   val gitCommits: StateFlow<List<GitCommit>> = workspaceRepository.gitCommits
   val knowledgeItems: StateFlow<List<KnowledgeItem>> = knowledgeRepository.items
+  val mem0Memories: StateFlow<List<com.example.data.memory.Mem0Memory>> = mem0Engine.memories
 
   init {
+    agentEngine.memoryCompiler = memoryCompiler
     val optimalConfig = HardwareAdvisor.computeOptimalVmConfig(deviceInfo)
     ubuntuSandbox.updateVmConfig(optimalConfig)
 
+    viewModelScope.launch {
+      modelCatalog.fetchLiveModels()
+    }
+
     val initialSession = AgentSession(
       id = UUID.randomUUID().toString(),
-      title = "OpenCode Free Project",
+      title = "OpenCode Live Project",
       agentMode = AgentMode.BUILD,
       messages = listOf(
         ChatMessage(
           id = UUID.randomUUID().toString(),
           sender = "assistant",
           text = """👋 Welcome to **OpenCode** on Android!
-- **Free Catalog Active**: Running `${agentEngine.preferredModel}` [FREE]. No API key required.
-- **Sandboxed Linux VM**: Essential **Ubuntu 24.04 LTS (Noble)** with `sudo` and internet access.
-- **Skills Available**: `/graphify` (AST & Dependency Trees), `/ponytail` (Code Review & Anti-patterns), `/superpower` (Autonomous TDD).
-- **Universal Knowledge**: Persistent rules & conventions active across all projects.
+- **OpenCode Model Catalog**: Running `${agentEngine.preferredModel}` [ALWAYS FREE & DEFAULT]. No API key required.
+- **Composio Agent Tooling**: Integrated 250+ developer tools (GitHub, Local File Tool, Linux Shell, Linear, Browserbase).
+- **Sandboxed Linux VM**: Essential **Ubuntu Server 26.04.1 LTS (ARM64 Essential - aarch64)** with `sudo` and live internet access.
+- **Mem0 Long-Term Memory**: Automatic context extraction & compilation across sessions.
+- **Skills & Slash Commands**: `/composio`, `/graphify`, `/ponytail`, `/superpower`.
 
 Type **`/`** to view all OpenCode slash commands & skills, or attach files via the paperclip icon!""",
           mode = AgentMode.BUILD
@@ -223,6 +249,30 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
   fun importFromAndroid(name: String, content: String) {
     ubuntuSandbox.importFromAndroid(name, content)
     workspaceRepository.writeFile("downloads/$name", content)
+  }
+
+  fun runFileInSandbox(path: String): String {
+    return workspaceRepository.runFileInSandbox(path, ubuntuSandbox)
+  }
+
+  fun switchProject(name: String) {
+    workspaceRepository.switchProject(name)
+  }
+
+  fun toggleModelEnabled(modelId: String) {
+    modelCatalog.toggleModelEnabled(modelId)
+  }
+
+  fun addMem0Memory(text: String, category: String = "fact") {
+    mem0Engine.add(text, category)
+  }
+
+  fun deleteMem0Memory(id: String) {
+    mem0Engine.delete(id)
+  }
+
+  fun clearAllMem0Memories() {
+    mem0Engine.clearAll()
   }
 
   fun runGraphify() {
@@ -384,6 +434,37 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
           updateSessionMessages(session.id) { it + sysMsg }
         }
       }
+      "mem0", "memory" -> {
+        val subcmd = args.lowercase().trim()
+        val sysMsg = when {
+          subcmd.startsWith("add ") -> {
+            val text = subcmd.removePrefix("add ").trim()
+            mem0Engine.add(text, "fact")
+            ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "Mem0: Stored long-term memory: \"$text\"", mode = session.agentMode)
+          }
+          subcmd == "clear" -> {
+            mem0Engine.clearAll()
+            ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "Mem0: Cleared all long-term memories.", mode = session.agentMode)
+          }
+          else -> {
+            val memories = mem0Engine.memories.value
+            val listText = if (memories.isEmpty()) {
+              "Mem0: No long-term memories recorded yet. Use `/mem0 add <text>` or chat with the agent."
+            } else {
+              "### Mem0 Long-Term Memory Store (${memories.size} memories):\n" +
+                memories.joinToString("\n") { "• [${it.category.uppercase()}] ${it.memory}" }
+            }
+            ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = listText, mode = session.agentMode)
+          }
+        }
+        updateSessionMessages(session.id) { it + sysMsg }
+      }
+      "composio" -> {
+        val composioArgs = args.split("\\s+".toRegex()).filter { it.isNotBlank() }
+        val out = composioManager.handleCliCommand(composioArgs)
+        val sysMsg = ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = "```\n$out\n```", mode = session.agentMode)
+        updateSessionMessages(session.id) { it + sysMsg }
+      }
       "doctor" -> {
         val info = deviceInfo
         val vm = _uiState.value.vmConfig
@@ -392,9 +473,12 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
 - Device Storage: ${info.totalStorageGb} GB (Free: ${info.availableStorageGb} GB)
 - VM Sandbox: ${vm.allocatedRamMb} MB RAM • ${vm.allocatedDiskGb} GB Storage
 - CPU: ${info.cpuCores} cores (${info.architecture})
-- OS: Ubuntu 24.04 LTS (Isolated Sandbox)
-- Free Model: ${_uiState.value.preferredModel} [FREE]
-- System Health: 100% Operational"""
+- OS: Ubuntu Server 26.04.1 LTS (ARM64 Server Essential - aarch64)
+- Package: /usr/local/bin/opencode (Debian stable linux-x64-deb / aarch64 native)
+- Tooling: Composio Engine v0.8.2 Active (${composioManager.connectedApps.value.count { it.isConnected }} connected tools)
+- Long-Term Memory: Mem0 Active (${mem0Engine.memories.value.size} memories compiled)
+- Free Model: ${_uiState.value.preferredModel} [BIGPICKLE DEFAULT - FREE]
+- System Health: 100% Operational (Isolated Sandbox)"""
         val sysMsg = ChatMessage(id = UUID.randomUUID().toString(), sender = "system", text = msg, mode = session.agentMode)
         updateSessionMessages(session.id) { it + sysMsg }
       }
@@ -425,12 +509,13 @@ Type **`/`** to view all OpenCode slash commands & skills, or attach files via t
           id = UUID.randomUUID().toString(),
           sender = "system",
           text = """OpenCode Slash Commands & Skills:
-- `/build` : Switch to Build mode
-- `/plan`  : Switch to Plan mode
+- `/build` : Switch to Build mode (file editing & execution)
+- `/plan`  : Switch to Plan mode (architectural design)
+- `/mem0`  : Inspect or manage Mem0 long-term memory
 - `/graphify` : Visual code graph & dependency trees
 - `/ponytail` : Automated code review & anti-pattern linter
 - `/superpower <goal>` : Autonomous TDD & self-healing supervisor
-- `/terminal`: Open Ubuntu 24.04 LTS sandbox terminal
+- `/terminal`: Open Ubuntu Server 26.04.1 LTS ARM64 sandbox
 - `/files` : Workspace file explorer & code editor
 - `/diff`  : Inspect modified file diffs
 - `/context`: Universal persistent knowledge base

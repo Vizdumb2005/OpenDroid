@@ -19,7 +19,54 @@ class WorkspaceRepository {
   private val _gitCommits = MutableStateFlow<List<GitCommit>>(emptyList())
   val gitCommits: StateFlow<List<GitCommit>> = _gitCommits.asStateFlow()
 
+  private val _activeProjectName = MutableStateFlow("OpenCode Project")
+  val activeProjectName: StateFlow<String> = _activeProjectName.asStateFlow()
+
   private var currentDirectory = "~/workspace"
+
+  fun switchProject(projectName: String, initialFiles: Map<String, String>? = null) {
+    _activeProjectName.value = projectName
+    if (initialFiles != null) {
+      val map = initialFiles.mapValues { (path, content) ->
+        WorkspaceFile(
+          path = path,
+          name = path.substringAfterLast('/'),
+          content = content,
+          originalContent = content,
+          isModified = false
+        )
+      }
+      _files.value = map
+    }
+  }
+
+  fun loadFolderFiles(folderName: String, filesMap: Map<String, String>) {
+    _activeProjectName.value = folderName
+    val map = filesMap.mapValues { (path, content) ->
+      WorkspaceFile(
+        path = path,
+        name = path.substringAfterLast('/'),
+        content = content,
+        originalContent = content,
+        isModified = false
+      )
+    }
+    _files.value = map
+  }
+
+  fun runFileInSandbox(path: String, sandbox: com.example.data.sandbox.UbuntuSandbox): String {
+    val file = _files.value[path] ?: return "File '$path' not found in workspace."
+    sandbox.writeFile("/home/ubuntu/$path", file.content)
+    val cmd = when {
+      path.endsWith(".ts") -> "ts-node $path"
+      path.endsWith(".js") -> "node $path"
+      path.endsWith(".py") -> "python3 $path"
+      path.endsWith(".sh") -> "bash $path"
+      else -> "cat $path"
+    }
+    val result = sandbox.executeCommand(cmd)
+    return result.output
+  }
 
   init {
     loadDefaultWorkspace()

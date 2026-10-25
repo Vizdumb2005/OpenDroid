@@ -78,17 +78,22 @@ fun TerminalScreen(
   val chipScroll = rememberScrollState()
 
   val quickLinuxCommands = listOf(
+    "ping 8.8.8.8",
+    "composio apps",
     "neofetch",
+    "uname -a",
+    "cat /etc/os-release",
+    "curl https://opencode.ai/download/stable/linux-x64-deb -o /tmp/opencode.deb",
+    "sudo dpkg -i /tmp/opencode.deb",
+    "opencode --version",
+    "node src/index.ts",
+    "mem0 stats",
+    "mem0 list",
     "sudo su",
     "free -h",
     "df -h",
     "apt update",
-    "apt install python3",
     "ls -la /",
-    "uname -a",
-    "cat /etc/os-release",
-    "pwd",
-    "help",
     "clear"
   )
 
@@ -122,7 +127,7 @@ fun TerminalScreen(
         )
         Spacer(modifier = Modifier.width(6.dp))
         Text(
-          text = "Ubuntu 24.04 LTS Sandbox",
+          text = "Ubuntu Server 26.04.1 LTS (ARM64)",
           style = MaterialTheme.typography.labelSmall,
           fontWeight = FontWeight.Bold,
           color = TextPrimary
@@ -207,7 +212,7 @@ fun TerminalScreen(
           val isRoot = sandbox.currentUser == "root" || entry.command.startsWith("sudo")
           val promptChar = if (isRoot) "#" else "$"
           val userColor = if (isRoot) ErrorRed else BuildGreenGlow
-          val userLabel = if (isRoot) "root@ubuntu-noble" else "ubuntu@ubuntu-noble"
+          val userLabel = if (isRoot) "root@ubuntu-server-arm64" else "ubuntu@ubuntu-server-arm64"
 
           Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
